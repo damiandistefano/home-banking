@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 from pathlib import Path
 
 import gspread
 import pandas as pd
+from google.oauth2.service_account import Credentials
+
+try:
+    import streamlit as st
+except ImportError:
+    st = None
 
 try:
     import openpyxl  # noqa: F401
@@ -28,6 +35,7 @@ SPREADSHEET_ID = "15EEuMOCws2hPp6sw6Nfpd8lBu9AazCtctgmLENHsyh4"
 WORKSHEET_NAME = "Hoja 1"
 OUTPUT_COLUMNS = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "Referencia", "ID"]
 GOOGLE_SERVICE_ACCOUNT_FILE = Path("./credentials.json")
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def file_signature(file_path: Path) -> str:
@@ -344,12 +352,19 @@ def append_to_google_sheet(rows: pd.DataFrame) -> int:
     if rows.empty:
         return 0
 
-    if not GOOGLE_SERVICE_ACCOUNT_FILE.exists() or GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size == 0:
+    service_account_info = None
+    if st is not None and hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
+        service_account_info = dict(st.secrets["gcp_service_account"])
+    elif GOOGLE_SERVICE_ACCOUNT_FILE.exists() and GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size > 0:
+        service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_FILE.read_text())
+
+    if not service_account_info:
         raise FileNotFoundError(
-            "Falta el archivo del service account. Guardá el JSON en ./credentials.json"
+            "Falta la credencial del service account. Usá st.secrets['gcp_service_account'] o credentials.json"
         )
 
-    gc = gspread.service_account(filename=str(GOOGLE_SERVICE_ACCOUNT_FILE))
+    credentials = Credentials.from_service_account_info(service_account_info, scopes=GOOGLE_SCOPES)
+    gc = gspread.authorize(credentials)
     worksheet = gc.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
     payload = rows.copy()
     payload["Fecha"] = pd.to_datetime(payload["Fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
