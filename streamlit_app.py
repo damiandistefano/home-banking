@@ -9,7 +9,7 @@ from transaction_uploader import OUTPUT_COLUMNS, normalize_sheet, read_excel_she
 
 st.set_page_config(page_title="Importador de transacciones", layout="wide")
 st.title("Importador de transacciones")
-st.caption("Usa `service_account.json` y comparte la hoja con el `client_email` de esa cuenta.")
+st.caption("Usa `st.secrets` en Cloud o `credentials.json` local, y comparte la hoja con el `client_email` de esa cuenta.")
 
 uploaded_files = st.file_uploader("Subí tus archivos .xls o .xlsx", type=["xls", "xlsx"], accept_multiple_files=True)
 debug = st.checkbox("Modo debug", value=True)
