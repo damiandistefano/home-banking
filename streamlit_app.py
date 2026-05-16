@@ -34,9 +34,10 @@ if uploaded_files:
                     frames.append(normalized)
 
     consolidated = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=OUTPUT_COLUMNS)
-    st.dataframe(consolidated, use_container_width=True)
+    display_df = consolidated.drop(columns=["ID"], errors="ignore")
+    st.dataframe(display_df, use_container_width=True)
 
-    csv_bytes = consolidated.to_csv(index=False).encode("utf-8")
+    csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button("Descargar CSV", csv_bytes, file_name="movimientos_normalizados.csv", mime="text/csv")
 
     if st.button("Subir a Google Sheets", type="primary", disabled=consolidated.empty):

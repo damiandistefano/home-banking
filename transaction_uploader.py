@@ -39,16 +39,18 @@ GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def load_service_account_info() -> dict | None:
+    # 1. EN LOCAL: Primero buscamos el archivo credentials.json que tenés en tu compu
+    if GOOGLE_SERVICE_ACCOUNT_FILE.exists() and GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size > 0:
+        return json.loads(GOOGLE_SERVICE_ACCOUNT_FILE.read_text())
+
+    # 2. EN LA NUBE: Si el archivo no existe (porque Git lo ignoró), usamos los Secrets
     if st is not None:
         try:
             secrets = st.secrets
+            if secrets and "gcp_service_account" in secrets:
+                return dict(secrets["gcp_service_account"])
         except Exception:
-            secrets = None
-        if secrets and "gcp_service_account" in secrets:
-            return dict(secrets["gcp_service_account"])
-
-    if GOOGLE_SERVICE_ACCOUNT_FILE.exists() and GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size > 0:
-        return json.loads(GOOGLE_SERVICE_ACCOUNT_FILE.read_text())
+            pass
 
     return None
 
