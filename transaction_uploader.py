@@ -38,6 +38,21 @@ GOOGLE_SERVICE_ACCOUNT_FILE = Path("./credentials.json")
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
+def load_service_account_info() -> dict | None:
+    if st is not None:
+        try:
+            secrets = st.secrets
+        except Exception:
+            secrets = None
+        if secrets and "gcp_service_account" in secrets:
+            return dict(secrets["gcp_service_account"])
+
+    if GOOGLE_SERVICE_ACCOUNT_FILE.exists() and GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size > 0:
+        return json.loads(GOOGLE_SERVICE_ACCOUNT_FILE.read_text())
+
+    return None
+
+
 def file_signature(file_path: Path) -> str:
     head = file_path.read_bytes()[:4]
     if head.startswith(b"PK"):
@@ -352,12 +367,7 @@ def append_to_google_sheet(rows: pd.DataFrame) -> int:
     if rows.empty:
         return 0
 
-    service_account_info = None
-    if st is not None and hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
-        service_account_info = dict(st.secrets["gcp_service_account"])
-    elif GOOGLE_SERVICE_ACCOUNT_FILE.exists() and GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size > 0:
-        service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_FILE.read_text())
-
+    service_account_info = load_service_account_info()
     if not service_account_info:
         raise FileNotFoundError(
             "Falta la credencial del service account. Usá st.secrets['gcp_service_account'] o credentials.json"
