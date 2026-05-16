@@ -1,4 +1,3 @@
-credentials.json
 .venv/
-__pycache__/
+__pycache__/ç
 .DS_Store
