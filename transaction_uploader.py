@@ -39,20 +39,9 @@ GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def load_service_account_info() -> dict | None:
-    # 1. EN LOCAL: Si existe el archivo en tu compu, lo lee directamente
-    if GOOGLE_SERVICE_ACCOUNT_FILE.exists() and GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size > 0:
+    # Lee el archivo físico que ahora sí está subido a la nube
+    if GOOGLE_SERVICE_ACCOUNT_FILE.exists():
         return json.loads(GOOGLE_SERVICE_ACCOUNT_FILE.read_text())
-
-    # 2. EN LA NUBE: Si no está el archivo, lee el JSON_CREDS de los Secrets
-    if st is not None:
-        try:
-            secrets = st.secrets
-            if secrets and "JSON_CREDS" in secrets:
-                # Cargamos el texto string como un diccionario JSON auténtico
-                return json.loads(secrets["JSON_CREDS"])
-        except Exception:
-            pass
-
     return None
 
 
