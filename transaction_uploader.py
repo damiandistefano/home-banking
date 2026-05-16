@@ -34,7 +34,7 @@ INPUT_DIR = Path("./input")
 SPREADSHEET_ID = "15EEuMOCws2hPp6sw6Nfpd8lBu9AazCtctgmLENHsyh4"
 WORKSHEET_NAME = "Hoja 1"
 OUTPUT_COLUMNS = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "Referencia", "ID"]
-GOOGLE_SERVICE_ACCOUNT_FILE = Path("./credentials.json")
+GOOGLE_SERVICE_ACCOUNT_FILE = Path("./datos_banco.txt")
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
