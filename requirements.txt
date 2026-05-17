@@ -3,3 +3,4 @@ pandas
 gspread
 openpyxl
 xlrd
+google-auth

@@ -32,16 +32,16 @@ except ImportError:
 
 INPUT_DIR = Path("./input")
 SPREADSHEET_ID = "15EEuMOCws2hPp6sw6Nfpd8lBu9AazCtctgmLENHsyh4"
-WORKSHEET_NAME = "Hoja 1"
+WORKSHEET_NAME = "Movimientos"
 OUTPUT_COLUMNS = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "Referencia", "ID"]
 GOOGLE_SERVICE_ACCOUNT_FILE = Path("./.datos_banco.txt")
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def load_service_account_info() -> dict | None:
-    # Lee el archivo físico que ahora sí está subido a la nube
-    if GOOGLE_SERVICE_ACCOUNT_FILE.exists():
+    if GOOGLE_SERVICE_ACCOUNT_FILE.exists() and GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size > 0:
         return json.loads(GOOGLE_SERVICE_ACCOUNT_FILE.read_text())
+
     return None
 
 
@@ -97,7 +97,10 @@ def clean_amount(value) -> float:
     if isinstance(value, (int, float)):
         return float(value)
 
-    text = str(value).strip().replace("$", "").replace(" ", "").replace("U$S", "").replace("USD", "")
+    text = str(value).strip().upper()
+    for char in ["$", "U$S", "USD", " "]:
+        text = text.replace(char, "")
+
     if not text:
         return 0.0
 
@@ -109,13 +112,24 @@ def clean_amount(value) -> float:
         negative = True
         text = text[1:]
 
-    if "," in text and "." in text:
-        if text.rfind(",") > text.rfind("."):
-            text = text.replace(".", "").replace(",", ".")
+    dots = text.count('.')
+    commas = text.count(',')
+
+    if dots > 0 and commas > 0:
+        if text.rfind(',') > text.rfind('.'):
+            text = text.replace('.', '').replace(',', '.')
         else:
-            text = text.replace(",", "")
-    elif "," in text:
-        text = text.replace(".", "").replace(",", ".")
+            text = text.replace(',', '')
+    elif commas > 0:
+        digits_after = len(text) - text.rfind(',') - 1
+        if commas > 1 or digits_after == 3:
+            text = text.replace(',', '')
+        else:
+            text = text.replace(',', '.')
+    elif dots > 0:
+        digits_after = len(text) - text.rfind('.') - 1
+        if dots > 1 or digits_after == 3:
+            text = text.replace('.', '')
 
     text = re.sub(r"[^0-9\.-]", "", text)
     if text in {"", ".", "-"}:
@@ -256,6 +270,7 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
 
     is_santander_layout = bool(santander_savings_col or santander_current_col)
     is_galicia_layout = bool(galicia_debit_col and galicia_credit_col)
+    is_usd_sheet = detect_currency_origin(df_raw, "").endswith("USD")
 
     if is_santander_layout:
         savings_series = df[santander_savings_col].apply(clean_amount) if santander_savings_col else pd.Series([0.0] * len(df), index=df.index)
@@ -273,16 +288,15 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
         amount_series = pd.Series([row_amount(idx) for idx in df.index], index=df.index)
         origin_series = pd.Series(
             [
-                "Santander - Caja de Ahorro"
-                if (santander_savings_col and float(savings_series.loc[idx]) != 0)
-                else "Santander - Cuenta Corriente"
-                if (santander_current_col and float(current_series.loc[idx]) != 0)
+                "Santander - Caja de Ahorro Pesos" if (santander_savings_col and float(savings_series.loc[idx]) != 0)
+                else "Santander - Cuenta Corriente" if (santander_current_col and float(current_series.loc[idx]) != 0)
                 else "Santander"
                 for idx in df.index
             ],
             index=df.index,
         )
-        origin_series = pd.Series([detect_currency_origin(df_raw, origin) for origin in origin_series], index=df.index)
+        if is_usd_sheet:
+            origin_series = pd.Series([f"{origin} - USD" for origin in origin_series], index=df.index)
     elif is_galicia_layout:
         debit_series = df[galicia_debit_col].apply(clean_amount)
         credit_series = df[galicia_credit_col].apply(clean_amount)
@@ -362,7 +376,7 @@ def append_to_google_sheet(rows: pd.DataFrame) -> int:
     service_account_info = load_service_account_info()
     if not service_account_info:
         raise FileNotFoundError(
-            "Falta la credencial del service account. Usá st.secrets['gcp_service_account'] o credentials.json"
+            "Falta la credencial del service account. Guardá el JSON en ./.datos_banco.txt"
         )
 
     credentials = Credentials.from_service_account_info(service_account_info, scopes=GOOGLE_SCOPES)
