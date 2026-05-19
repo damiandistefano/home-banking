@@ -31,7 +31,8 @@ except ImportError:
 
 
 INPUT_DIR = Path("./input")
-SPREADSHEET_ID = "15EEuMOCws2hPp6sw6Nfpd8lBu9AazCtctgmLENHsyh4"
+# SPREADSHEET_ID = "15EEuMOCws2hPp6sw6Nfpd8lBu9AazCtctgmLENHsyh4" # Real
+SPREADSHEET_ID = "1_AgKWi22JQxYCdrGmQn5aA_YT2zHs1fvVbZvCS9ARx8" # Prueba
 WORKSHEET_NAME = "Movimientos"
 OUTPUT_COLUMNS = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "Referencia", "ID"]
 GOOGLE_SERVICE_ACCOUNT_FILE = Path("./.datos_banco.txt")
@@ -207,7 +208,6 @@ def build_transaction_id(row: pd.Series) -> str:
             str(row.get("Descripción", "")),
             str(row.get("Monto", "")),
             str(row.get("Origen", "")),
-            str(row.get("Referencia", "")),
         ]
     )
     return hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
@@ -243,6 +243,23 @@ def clean_reference(value) -> str:
     return text
 
 
+def parse_excel_date(series: pd.Series) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype=str)
+
+    if not isinstance(series, pd.Series):
+        series = pd.Series(series)
+
+    numeric = pd.to_numeric(series, errors="coerce")
+    parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
+
+    if numeric.notna().any():
+        numeric_dates = pd.to_datetime(numeric, unit="D", origin="1899-12-30", errors="coerce")
+        parsed = parsed.where(numeric.isna(), numeric_dates)
+
+    return parsed.dt.strftime("%Y-%m-%d")
+
+
 def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = False) -> pd.DataFrame:
     header_row = detect_header_row(df_raw, debug=debug)
     if header_row == -1:
@@ -261,15 +278,16 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
     date_col, desc_col, amount_col = cols
-    ref_col = detect_optional_column(df, ["referencia", "reference", "comprobante", "id", "nro. transacción", "nro transaccion", "numero de transaccion", "nro. transaccion"])
-
     santander_savings_col = detect_optional_column(df, ["caja de ahorro", "caja ahorro"])
     santander_current_col = detect_optional_column(df, ["cuenta corriente", "cta cte", "cta. cte."])
     galicia_debit_col = detect_optional_column(df, ["débito", "debito"])
     galicia_credit_col = detect_optional_column(df, ["crédito", "credito"])
+    macro_debit_col = detect_optional_column(df, ["débito", "debito"])
+    macro_credit_col = detect_optional_column(df, ["crédito", "credito"])
 
     is_santander_layout = bool(santander_savings_col or santander_current_col)
     is_galicia_layout = bool(galicia_debit_col and galicia_credit_col)
+    is_macro_layout = "macro" in str(bank_name).lower()
     is_usd_sheet = detect_currency_origin(df_raw, "").endswith("USD")
 
     if is_santander_layout:
@@ -297,12 +315,23 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
         )
         if is_usd_sheet:
             origin_series = pd.Series([f"{origin} - USD" for origin in origin_series], index=df.index)
+            
     elif is_galicia_layout:
-        debit_series = df[galicia_debit_col].apply(clean_amount)
-        credit_series = df[galicia_credit_col].apply(clean_amount)
+        # ARREGLO AQUÍ: Forzamos .abs() para evitar el doble negativo
+        debit_series = df[galicia_debit_col].apply(clean_amount).abs()
+        credit_series = df[galicia_credit_col].apply(clean_amount).abs()
         amount_series = credit_series - debit_series
         galicia_origin = detect_currency_origin(df_raw, detect_galicia_origin(df_raw, bank_name=bank_name))
         origin_series = pd.Series([galicia_origin for _ in df.index], index=df.index)
+        
+    elif is_macro_layout and macro_debit_col and macro_credit_col:
+        # ARREGLO AQUÍ: También protegemos a Macro por las dudas
+        debit_series = df[macro_debit_col].apply(clean_amount).abs()
+        credit_series = df[macro_credit_col].apply(clean_amount).abs()
+        amount_series = credit_series - debit_series
+        macro_origin = detect_currency_origin(df_raw, detect_macro_origin(df_raw, bank_name=bank_name))
+        origin_series = pd.Series([macro_origin for _ in df.index], index=df.index)
+        
     else:
         amount_series = df[amount_col].apply(clean_amount)
         if amount_col.strip().lower() == "importe":
@@ -313,18 +342,14 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
 
     out = pd.DataFrame()
     out["ID"] = ""
-    out["Fecha"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    out["Fecha"] = parse_excel_date(df[date_col])
     out["Descripción"] = df[desc_col].astype(str).str.strip()
-    out["Monto"] = amount_series.abs()
-    out["Tipo"] = amount_series.apply(lambda amount: "Ingreso" if amount >= 0 else "Egreso")
+    signed_amounts = amount_series.copy()
+    out["Tipo"] = signed_amounts.apply(lambda amount: "Ingreso" if amount >= 0 else "Egreso")
+    out["Monto"] = signed_amounts.abs()
     out["Origen"] = origin_series
     out["Categoria"] = ""
-    if ref_col:
-        out["Referencia"] = df[ref_col].apply(clean_reference)
-    elif is_galicia_layout:
-        out["Referencia"] = ""
-    else:
-        out["Referencia"] = ""
+    out["Referencia"] = ""
 
     out = out.dropna(subset=["Fecha"])
     out = out[out["Descripción"].ne("") & out["Descripción"].ne("nan")]
@@ -369,9 +394,9 @@ def export_csv(rows: pd.DataFrame, output_path: Path) -> None:
     rows.to_csv(output_path, index=False, encoding="utf-8-sig")
 
 
-def append_to_google_sheet(rows: pd.DataFrame) -> int:
+def append_to_google_sheet(rows: pd.DataFrame) -> dict[str, int]:
     if rows.empty:
-        return 0
+        return {"inserted": 0, "duplicates": 0, "original": 0}
 
     service_account_info = load_service_account_info()
     if not service_account_info:
@@ -382,10 +407,33 @@ def append_to_google_sheet(rows: pd.DataFrame) -> int:
     credentials = Credentials.from_service_account_info(service_account_info, scopes=GOOGLE_SCOPES)
     gc = gspread.authorize(credentials)
     worksheet = gc.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
-    payload = rows.copy()
+    sheet_columns = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "ID"]
+    payload = rows.reindex(columns=sheet_columns).copy()
     payload["Fecha"] = pd.to_datetime(payload["Fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
-    worksheet.append_rows(payload.fillna("").astype(object).values.tolist(), value_input_option="USER_ENTERED")
-    return len(rows)
+
+    try:
+        header = worksheet.row_values(1)
+        id_col_index = header.index("ID") + 1 if "ID" in header else 7
+    except Exception:
+        id_col_index = 7
+
+    existing_ids = set(
+        str(value).strip()
+        for value in worksheet.col_values(id_col_index)[1:]
+        if str(value).strip()
+    )
+
+    payload["ID"] = payload["ID"].astype(str).str.strip()
+    original_count = len(payload)
+    filtered_payload = payload[~payload["ID"].isin(existing_ids)].copy()
+    inserted_count = len(filtered_payload)
+    duplicates_count = original_count - inserted_count
+
+    if inserted_count == 0:
+        return {"inserted": 0, "duplicates": duplicates_count, "original": original_count}
+
+    worksheet.append_rows(filtered_payload.fillna("").astype(object).values.tolist(), value_input_option="USER_ENTERED")
+    return {"inserted": inserted_count, "duplicates": duplicates_count, "original": original_count}
 
 
 def process_folder(folder: Path = INPUT_DIR, debug: bool = False) -> pd.DataFrame:
@@ -394,7 +442,7 @@ def process_folder(folder: Path = INPUT_DIR, debug: bool = False) -> pd.DataFram
     return read_excel_files(folder, debug=debug)
 
 
-def upload_dataframe(rows: pd.DataFrame) -> int:
+def upload_dataframe(rows: pd.DataFrame) -> dict[str, int]:
     return append_to_google_sheet(rows)
 
 
