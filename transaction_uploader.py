@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import re
+import os
 from pathlib import Path
 
-import gspread
 import pandas as pd
-from google.oauth2.service_account import Credentials
+import psycopg2
+from psycopg2.extras import execute_values
 
 try:
     import streamlit as st
@@ -31,19 +31,45 @@ except ImportError:
 
 
 INPUT_DIR = Path("./input")
-# SPREADSHEET_ID = "15EEuMOCws2hPp6sw6Nfpd8lBu9AazCtctgmLENHsyh4" # Real
-SPREADSHEET_ID = "1_AgKWi22JQxYCdrGmQn5aA_YT2zHs1fvVbZvCS9ARx8" # Prueba
-WORKSHEET_NAME = "Movimientos"
-OUTPUT_COLUMNS = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "Referencia", "ID"]
-GOOGLE_SERVICE_ACCOUNT_FILE = Path("./.datos_banco.txt")
-GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+OUTPUT_COLUMNS = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "ID"]
+TABLE_NAME = "movimientos"
 
 
-def load_service_account_info() -> dict | None:
-    if GOOGLE_SERVICE_ACCOUNT_FILE.exists() and GOOGLE_SERVICE_ACCOUNT_FILE.stat().st_size > 0:
-        return json.loads(GOOGLE_SERVICE_ACCOUNT_FILE.read_text())
+def get_database_url() -> str:
+    database_url = os.environ.get("DATABASE_URL", "").strip()
 
-    return None
+    if not database_url and st is not None:
+        try:
+            database_url = str(st.secrets.get("DATABASE_URL", "")).strip()
+        except Exception:
+            database_url = ""
+
+    if not database_url:
+        raise EnvironmentError("Falta DATABASE_URL. Configurala en Streamlit Secrets o como variable de entorno.")
+    return database_url
+
+
+def get_db_connection():
+    return psycopg2.connect(get_database_url())
+
+
+def ensure_table_exists() -> None:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                create table if not exists {TABLE_NAME} (
+                  id text primary key,
+                  fecha date not null,
+                  descripcion text not null,
+                  monto numeric(14,2) not null,
+                  tipo text not null,
+                  origen text not null,
+                  categoria text default ''
+                )
+                """
+            )
+        conn.commit()
 
 
 def file_signature(file_path: Path) -> str:
@@ -349,8 +375,6 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
     out["Monto"] = signed_amounts.abs()
     out["Origen"] = origin_series
     out["Categoria"] = ""
-    out["Referencia"] = ""
-
     out = out.dropna(subset=["Fecha"])
     out = out[out["Descripción"].ne("") & out["Descripción"].ne("nan")]
     out["ID"] = out.apply(build_transaction_id, axis=1)
@@ -394,45 +418,52 @@ def export_csv(rows: pd.DataFrame, output_path: Path) -> None:
     rows.to_csv(output_path, index=False, encoding="utf-8-sig")
 
 
-def append_to_google_sheet(rows: pd.DataFrame) -> dict[str, int]:
+def append_to_database(rows: pd.DataFrame) -> dict[str, int]:
     if rows.empty:
         return {"inserted": 0, "duplicates": 0, "original": 0}
 
-    service_account_info = load_service_account_info()
-    if not service_account_info:
-        raise FileNotFoundError(
-            "Falta la credencial del service account. Guardá el JSON en ./.datos_banco.txt"
-        )
+    ensure_table_exists()
 
-    credentials = Credentials.from_service_account_info(service_account_info, scopes=GOOGLE_SCOPES)
-    gc = gspread.authorize(credentials)
-    worksheet = gc.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
-    sheet_columns = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "ID"]
+    sheet_columns = ["ID", "Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria"]
     payload = rows.reindex(columns=sheet_columns).copy()
-    payload["Fecha"] = pd.to_datetime(payload["Fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
-
-    try:
-        header = worksheet.row_values(1)
-        id_col_index = header.index("ID") + 1 if "ID" in header else 7
-    except Exception:
-        id_col_index = 7
-
-    existing_ids = set(
-        str(value).strip()
-        for value in worksheet.col_values(id_col_index)[1:]
-        if str(value).strip()
-    )
-
+    payload["Fecha"] = pd.to_datetime(payload["Fecha"], errors="coerce").dt.date
     payload["ID"] = payload["ID"].astype(str).str.strip()
     original_count = len(payload)
-    filtered_payload = payload[~payload["ID"].isin(existing_ids)].copy()
-    inserted_count = len(filtered_payload)
-    duplicates_count = original_count - inserted_count
+    payload = payload[payload["Fecha"].notna() & payload["ID"].ne("")].drop_duplicates(subset=["ID"], keep="first")
+    records = [
+        (
+            row["ID"],
+            row["Fecha"],
+            row["Descripción"],
+            row["Monto"],
+            row["Tipo"],
+            row["Origen"],
+            row["Categoria"],
+        )
+        for _, row in payload.fillna("").iterrows()
+    ]
 
-    if inserted_count == 0:
-        return {"inserted": 0, "duplicates": duplicates_count, "original": original_count}
+    if not records:
+        return {"inserted": 0, "duplicates": original_count, "original": original_count}
 
-    worksheet.append_rows(filtered_payload.fillna("").astype(object).values.tolist(), value_input_option="USER_ENTERED")
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            existing_ids = set()
+            cur.execute(f"select id from {TABLE_NAME} where id = any(%s)", ([record[0] for record in records],))
+            existing_ids.update(row[0] for row in cur.fetchall())
+
+            filtered_records = [record for record in records if record[0] not in existing_ids]
+            inserted_count = len(filtered_records)
+            duplicates_count = original_count - inserted_count
+
+            if filtered_records:
+                execute_values(
+                    cur,
+                    f"insert into {TABLE_NAME} (id, fecha, descripcion, monto, tipo, origen, categoria) values %s",
+                    filtered_records,
+                )
+        conn.commit()
+
     return {"inserted": inserted_count, "duplicates": duplicates_count, "original": original_count}
 
 
@@ -443,15 +474,15 @@ def process_folder(folder: Path = INPUT_DIR, debug: bool = False) -> pd.DataFram
 
 
 def upload_dataframe(rows: pd.DataFrame) -> dict[str, int]:
-    return append_to_google_sheet(rows)
+    return append_to_database(rows)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Importa Excel bancarios a Google Sheets o exporta un CSV local.")
+    parser = argparse.ArgumentParser(description="Importa Excel bancarios a Neon o exporta un CSV local.")
     parser.add_argument("--input-dir", default=str(INPUT_DIR), help="Carpeta con archivos Excel")
     parser.add_argument("--export-csv", default="", help="Ruta para exportar un CSV local")
     parser.add_argument("--debug", action="store_true", help="Muestra diagnóstico de lectura y columnas")
-    parser.add_argument("--skip-upload", action="store_true", help="No sube nada a Google Sheets")
+    parser.add_argument("--skip-upload", action="store_true", help="No sube nada a Neon")
     args = parser.parse_args()
 
     consolidated = process_folder(Path(args.input_dir), debug=args.debug)

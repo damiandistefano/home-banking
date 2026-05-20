@@ -1,6 +1,5 @@
 streamlit
 pandas
-gspread
 openpyxl
 xlrd
-google-auth
+psycopg2-binary
