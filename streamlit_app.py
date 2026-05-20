@@ -1,5 +1,8 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from datetime import date
+import time
+import uuid
 
 import pandas as pd
 import streamlit as st
@@ -762,6 +765,93 @@ def render_upload_tab() -> None:
             accept_multiple_files=True,
             key=f"uploader_{st.session_state['uploader_key_version']}",
         )
+
+    with st.expander("💵 Carga Manual de Efectivo / Caja", expanded=False):
+        with st.form(key="manual_cash_form", clear_on_submit=True):
+            col_fecha, col_desc = st.columns([1, 2])
+            with col_fecha:
+                manual_fecha = st.date_input("Fecha", value=date.today())
+            with col_desc:
+                manual_descripcion = st.text_input("Descripción")
+
+            col_cuenta, col_moneda = st.columns(2)
+            with col_cuenta:
+                manual_cuenta = st.text_input("Cuenta", value="Caja Efectivo")
+            with col_moneda:
+                manual_moneda = st.selectbox("Moneda", ["ARS", "USD"])
+
+            col_tipo, col_monto = st.columns([1, 1])
+            with col_tipo:
+                manual_tipo = st.radio(
+                    "Tipo de Movimiento",
+                    ["Ingreso", "Egreso"],
+                    horizontal=True,
+                )
+            with col_monto:
+                manual_monto = st.number_input("Monto", min_value=0.0, step=1000.0)
+
+            submitted_manual = st.form_submit_button("Registrar Movimiento", type="primary")
+
+        if submitted_manual:
+            if not manual_descripcion.strip():
+                st.error("La descripción es obligatoria.")
+            elif not manual_cuenta.strip():
+                st.error("La cuenta es obligatoria.")
+            elif manual_monto <= 0:
+                st.error("El monto debe ser mayor a cero.")
+            else:
+                movimiento_id = str(uuid.uuid4())
+                signed_amount = float(manual_monto) * (-1 if manual_tipo == "Egreso" else 1)
+
+                manual_df = pd.DataFrame(
+                    [
+                        {
+                            "ID": movimiento_id,
+                            "Fecha": manual_fecha,
+                            "Descripción": manual_descripcion.strip(),
+                            "Cuenta": manual_cuenta.strip(),
+                            "Monto": signed_amount,
+                            "Moneda": manual_moneda,
+                        }
+                    ]
+                )
+
+                try:
+                    from transaction_uploader import TABLE_NAME, get_db_connection
+
+                    with st.spinner("Registrando movimiento..."):
+                        record = {
+                            "id": str(movimiento_id),
+                            "fecha": manual_fecha,
+                            "descripcion": str(manual_descripcion.strip()),
+                            "monto": float(signed_amount),
+                            "tipo": str(manual_tipo),
+                            "origen": str(manual_cuenta.strip()),
+                            "categoria": "",
+                        }
+
+                        with get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    f"insert into {TABLE_NAME} (id, fecha, descripcion, monto, tipo, origen, categoria) values (%s, %s, %s, %s, %s, %s, %s)",
+                                    (
+                                        record["id"],
+                                        record["fecha"],
+                                        record["descripcion"],
+                                        record["monto"],
+                                        record["tipo"],
+                                        record["origen"],
+                                        record["categoria"],
+                                    ),
+                                )
+                            conn.commit()
+
+                    load_db_data.clear()
+                    st.success("Movimiento registrado correctamente.")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error al registrar el movimiento: {exc}")
 
     if not uploaded_file:
         if st.session_state.get("subida_exitosa"):
