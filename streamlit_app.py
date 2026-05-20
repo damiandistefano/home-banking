@@ -242,6 +242,25 @@ def render_individual_file_card(file_name: str, ingresos: float, egresos: float,
     )
 
 
+def render_account_summary_card(account_name: str, ingresos: float, egresos: float, neto: float, currency: str) -> None:
+    label = f"Resumen de Cuenta: {account_name} ({currency})"
+    render_individual_file_card(label, ingresos, egresos, neto, currency)
+
+
+def resolve_file_account_label(frame: pd.DataFrame) -> str:
+    if "Origen" not in frame.columns:
+        return "Sin cuenta"
+
+    values = [str(value).strip() for value in frame["Origen"].dropna().astype(str).tolist() if str(value).strip()]
+    unique_values = list(dict.fromkeys(values))
+
+    if not unique_values:
+        return "Sin cuenta"
+    if len(unique_values) == 1:
+        return unique_values[0]
+    return ", ".join(unique_values[:2]) + ("..." if len(unique_values) > 2 else "")
+
+
 def style_tipo(val):
     if str(val).lower() == "ingreso":
         return "background-color: rgba(34, 197, 94, 0.14); color: #9ef0b2; font-weight: 700; border-radius: 999px; padding: 0.15rem 0.45rem;"
@@ -661,17 +680,6 @@ def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     st.markdown("### Detalle de transacciones")
     render_dashboard_detail_table(filtered, currency)
 
-    with st.expander("Ver base cruda y auditoría"):
-        raw_df = frame.drop(columns=["Fecha_dt"], errors="ignore").copy()
-        if "Fecha_display" in raw_df.columns:
-            raw_df["Fecha"] = raw_df["Fecha_display"]
-            raw_df.drop(columns=["Fecha_display"], inplace=True, errors="ignore")
-        raw_df = raw_df.drop(columns=["ID", "Categoria", "Origen"], errors="ignore")
-        if "Cuenta" not in raw_df.columns and "Origen" in frame.columns:
-            raw_df["Cuenta"] = frame["Origen"]
-        raw_df = raw_df.dropna(axis=1, how="all")
-        st.dataframe(raw_df, use_container_width=True, hide_index=True)
-
 
 def render_upload_tab() -> None:
     st.subheader("Cargar movimientos")
@@ -741,6 +749,7 @@ def render_upload_tab() -> None:
                     "Egresos": egresos,
                     "Diferencia": diferencia,
                     "Moneda": currency,
+                    "Cuenta": resolve_file_account_label(file_df),
                 }
             except Exception as exc:
                 st.error(f"Error al procesar {uploaded_file.name}: {exc}")
@@ -774,8 +783,8 @@ def render_upload_tab() -> None:
                 st.info("No hubo archivos válidos para desglosar.")
             else:
                 for file_name, summary in file_summaries.items():
-                    render_individual_file_card(
-                        file_name,
+                    render_account_summary_card(
+                        summary.get("Cuenta", file_name),
                         summary["Ingresos"],
                         summary["Egresos"],
                         summary["Diferencia"],
@@ -797,12 +806,25 @@ def render_upload_tab() -> None:
         unsafe_allow_html=True,
     )
 
-    st.dataframe(
-        df_vista_previa.style.map(style_tipo, subset=["Tipo"]),
+    editor_df = df_vista_previa.copy()
+    if "Descripción" not in editor_df.columns:
+        editor_df["Descripción"] = ""
+
+    editor_columns = {column: st.column_config.Column(column) for column in editor_df.columns if column != "Descripción"}
+    editor_columns["Descripción"] = st.column_config.TextColumn("Descripción")
+
+    edited_preview = st.data_editor(
+        editor_df,
         use_container_width=True,
         hide_index=True,
-        column_config={"Cuenta": st.column_config.TextColumn("Cuenta")},
+        column_config=editor_columns,
+        disabled=[col for col in editor_df.columns if col != "Descripción"],
+        key="upload_preview_editor",
     )
+
+    df_vista_previa = edited_preview.copy()
+    if "Descripción" in df_vista_previa.columns and "Descripción" in df_para_sheets.columns:
+        df_para_sheets.loc[df_vista_previa.index, "Descripción"] = df_vista_previa["Descripción"].astype(str).values
 
     if st.button("🚀 Confirmar y Subir", type="primary"):
         with st.spinner("Subiendo datos..."):
