@@ -3,6 +3,8 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
+from plotly import express as px
 
 from transaction_uploader import (
     OUTPUT_COLUMNS,
@@ -242,10 +244,418 @@ def render_individual_file_card(file_name: str, ingresos: float, egresos: float,
 
 def style_tipo(val):
     if str(val).lower() == "ingreso":
-        return "background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px;"
+        return "background-color: rgba(34, 197, 94, 0.14); color: #9ef0b2; font-weight: 700; border-radius: 999px; padding: 0.15rem 0.45rem;"
     if str(val).lower() == "egreso":
-        return "background-color: #c62828; color: white; font-weight: bold; border-radius: 4px;"
+        return "background-color: rgba(239, 68, 68, 0.14); color: #ffb3b3; font-weight: 700; border-radius: 999px; padding: 0.15rem 0.45rem;"
     return ""
+
+
+def parse_date_series(series: pd.Series) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype="datetime64[ns]")
+
+    if not isinstance(series, pd.Series):
+        series = pd.Series(series)
+
+    numeric = pd.to_numeric(series, errors="coerce")
+    parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    numeric_mask = numeric.notna()
+
+    if numeric_mask.any():
+        parsed.loc[numeric_mask] = pd.to_datetime(
+            numeric.loc[numeric_mask],
+            unit="D",
+            origin="1899-12-30",
+            errors="coerce",
+        )
+
+    if (~numeric_mask).any():
+        parsed.loc[~numeric_mask] = pd.to_datetime(series.loc[~numeric_mask], errors="coerce", dayfirst=True)
+
+    return parsed
+
+
+def normalize_dashboard_frame(df: pd.DataFrame) -> pd.DataFrame:
+    dashboard_df = df.copy()
+
+    if "Categoría" in dashboard_df.columns and "Categoria" not in dashboard_df.columns:
+        dashboard_df.rename(columns={"Categoría": "Categoria"}, inplace=True)
+
+    for col in ["Origen", "Tipo", "Categoria", "Descripción"]:
+        if col not in dashboard_df.columns:
+            dashboard_df[col] = ""
+
+    dashboard_df["Fecha_dt"] = parse_date_series(dashboard_df.get("Fecha"))
+    dashboard_df["Fecha_display"] = dashboard_df["Fecha_dt"].dt.date
+    dashboard_df["Monto"] = pd.to_numeric(dashboard_df.get("Monto"), errors="coerce").fillna(0.0)
+    dashboard_df["Origen"] = dashboard_df["Origen"].fillna("").astype(str)
+    dashboard_df["Tipo"] = dashboard_df["Tipo"].fillna("").astype(str)
+    dashboard_df["Categoria"] = dashboard_df["Categoria"].fillna("").astype(str)
+    dashboard_df["Descripción"] = dashboard_df["Descripción"].fillna("").astype(str)
+    dashboard_df["Moneda"] = dashboard_df["Origen"].str.upper().apply(
+        lambda x: "USD" if any(token in x for token in ["USD", "U$S", "DOLARES", "DÓLARES"]) else "ARS"
+    )
+
+    return dashboard_df
+
+
+def calculate_dashboard_totals(frame: pd.DataFrame) -> tuple[float, float, float]:
+    tipo = frame.get("Tipo", pd.Series(dtype=str)).astype(str).str.lower()
+    montos = pd.to_numeric(frame.get("Monto"), errors="coerce").fillna(0.0).abs()
+    ingresos = montos[tipo == "ingreso"].sum()
+    egresos = montos[tipo == "egreso"].sum()
+    return ingresos, egresos, ingresos - egresos
+
+
+def _currency_meta(currency: str) -> tuple[str, str]:
+    currency = (currency or "ARS").upper()
+    return ("Pesos (ARS)", "$") if currency == "ARS" else ("Dólares (USD)", "U$S")
+
+
+def _format_currency_value(amount: float, symbol: str) -> str:
+    numeric = pd.to_numeric(amount, errors="coerce")
+    if pd.isna(numeric):
+        numeric = 0.0
+    formatted = f"{numeric:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{symbol} {formatted}"
+
+
+def _dashboard_css() -> None:
+    st.markdown(
+        """
+        <style>
+        .dash-shell {
+            background: rgba(10, 12, 18, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 18px;
+            padding: 1rem 1rem 0.5rem 1rem;
+            margin-bottom: 1rem;
+        }
+        .dash-filter-label {
+            font-size: 0.78rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            opacity: 0.72;
+            margin-bottom: 0.35rem;
+        }
+        .dash-kpi {
+            background: linear-gradient(180deg, rgba(23, 27, 36, 0.95), rgba(16, 18, 25, 0.95));
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-radius: 12px;
+            padding: 1rem 1.05rem;
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+            height: 100%;
+        }
+        .dash-kpi-label {
+            font-size: 0.78rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            opacity: 0.72;
+            margin-bottom: 0.35rem;
+        }
+        .dash-kpi-value {
+            font-size: 1.45rem;
+            font-weight: 800;
+            line-height: 1.05;
+        }
+        .dash-kpi-value.neto {
+            font-size: 2rem;
+        }
+        .dash-kpi-meta {
+            font-size: 0.82rem;
+            opacity: 0.75;
+            margin-top: 0.35rem;
+        }
+        .dash-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            margin-top: 0.5rem;
+        }
+        .dash-badge.up { background: rgba(34, 197, 94, 0.12); color: #9ef0b2; }
+        .dash-badge.down { background: rgba(239, 68, 68, 0.12); color: #ffb3b3; }
+        .dash-badge.neutral { background: rgba(148, 163, 184, 0.12); color: #dbe4f0; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpi_card(title: str, value: str, meta: str, trend: str = "neutral", emphasize: bool = False) -> None:
+    badge_text = {"up": "↗ tendencia positiva", "down": "↘ salida de fondos", "neutral": "• seguimiento"}.get(trend, "• seguimiento")
+    trend_class = trend if trend in {"up", "down"} else "neutral"
+    value_class = "dash-kpi-value neto" if emphasize else "dash-kpi-value"
+    st.markdown(
+        f"""
+        <div class="dash-kpi">
+          <div class="dash-kpi-label">{title}</div>
+          <div class="{value_class}">{value}</div>
+          <div class="dash-kpi-meta">{meta}</div>
+          <div class="dash-badge {trend_class}">{badge_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_dashboard_kpis(frame: pd.DataFrame, currency: str) -> None:
+    ingresos, egresos, neto = calculate_dashboard_totals(frame)
+    symbol = _currency_meta(currency)[1]
+    net_trend = "up" if neto >= 0 else "down"
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        render_kpi_card("Saldo Neto", _format_currency_value(neto, symbol), "Resultado acumulado del período", net_trend, emphasize=True)
+    with c2:
+        render_kpi_card("Ingresos", _format_currency_value(ingresos, symbol), "Entradas de dinero filtradas", "up")
+    with c3:
+        render_kpi_card("Egresos", _format_currency_value(egresos, symbol), "Salidas de dinero filtradas", "down")
+
+
+def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.DataFrame, str]:
+    min_date = frame["Fecha_dt"].min()
+    max_date = frame["Fecha_dt"].max()
+    if pd.isna(min_date) or pd.isna(max_date):
+        return frame.iloc[0:0], ""
+
+    min_day = min_date.date()
+    max_day = max_date.date()
+    currency_key = currency.lower()
+    date_key = f"dashboard_date_{currency_key}"
+    origin_key = f"dashboard_origin_{currency_key}"
+    search_key = f"dashboard_search_{currency_key}"
+
+    if date_key not in st.session_state:
+        st.session_state[date_key] = (min_day, max_day)
+    if origin_key not in st.session_state:
+        st.session_state[origin_key] = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
+    if search_key not in st.session_state:
+        st.session_state[search_key] = ""
+
+    st.markdown("<div class='dash-shell'>", unsafe_allow_html=True)
+    filter_cols = st.columns([1.0, 1.5, 1.25, 1.25])
+
+    with filter_cols[0]:
+        st.markdown("<div class='dash-filter-label'>Moneda</div>", unsafe_allow_html=True)
+        st.caption(_currency_meta(currency)[0])
+
+    with filter_cols[1]:
+        st.markdown("<div class='dash-filter-label'>Rango de fechas</div>", unsafe_allow_html=True)
+        st.date_input(
+            "Rango de fechas",
+            value=st.session_state[date_key],
+            min_value=min_day,
+            max_value=max_day,
+            key=date_key,
+            label_visibility="collapsed",
+        )
+
+    origin_options = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
+    with filter_cols[2]:
+        st.markdown("<div class='dash-filter-label'>Origen</div>", unsafe_allow_html=True)
+        st.multiselect(
+            "Origen",
+            options=origin_options,
+            default=st.session_state[origin_key],
+            key=origin_key,
+            label_visibility="collapsed",
+        )
+
+    with filter_cols[3]:
+        st.markdown("<div class='dash-filter-label'>Buscar</div>", unsafe_allow_html=True)
+        st.text_input(
+            "Buscar transacción...",
+            placeholder="Buscar transacción...",
+            key=search_key,
+            label_visibility="collapsed",
+        )
+
+    selected_range = st.session_state[date_key]
+    selected_origins = st.session_state[origin_key]
+    search_text = str(st.session_state[search_key]).strip().lower()
+
+    filtered = frame.copy()
+    filtered = filtered[(filtered["Fecha_dt"].dt.date >= selected_range[0]) & (filtered["Fecha_dt"].dt.date <= selected_range[1])]
+    if selected_origins:
+        filtered = filtered[filtered["Origen"].isin(selected_origins)]
+    else:
+        filtered = filtered.iloc[0:0]
+
+    if search_text:
+        search_blob = (
+            filtered[[c for c in ["Descripción", "Origen", "Categoria", "Tipo"] if c in filtered.columns]]
+            .fillna("")
+            .astype(str)
+            .agg(" ".join, axis=1)
+            .str.lower()
+        )
+        filtered = filtered[search_blob.str.contains(search_text, na=False)]
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    return filtered, _currency_meta(currency)[1]
+
+
+def build_cashflow_figure(frame: pd.DataFrame, currency: str):
+    currency_label, symbol = _currency_meta(currency)
+    if frame.empty or frame["Fecha_dt"].isna().all():
+        fig = go.Figure()
+        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Evolución temporal - {currency_label}")
+        return fig
+
+    working = frame.dropna(subset=["Fecha_dt"]).copy()
+    tipo = working["Tipo"].astype(str).str.lower()
+    monto = pd.to_numeric(working["Monto"], errors="coerce").fillna(0.0).abs()
+    signed = monto.where(tipo != "egreso", -monto)
+    working["Movimiento"] = signed
+    daily = working.assign(Dia=working["Fecha_dt"].dt.normalize()).groupby("Dia", as_index=False)["Movimiento"].sum().sort_values("Dia")
+    full_range = pd.date_range(daily["Dia"].min(), daily["Dia"].max(), freq="D")
+    daily = daily.set_index("Dia").reindex(full_range, fill_value=0.0).rename_axis("Dia").reset_index()
+    daily["Acumulado"] = daily["Movimiento"].cumsum()
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=daily["Dia"],
+            y=daily["Acumulado"],
+            mode="lines",
+            line=dict(color="#7aa2ff", width=3),
+            fill="tozeroy",
+            fillcolor="rgba(122, 162, 255, 0.18)",
+            hovertemplate=f"%{{x|%d/%m/%Y}}<br>Saldo acumulado: {symbol} %{{y:,.2f}}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        height=360,
+        margin=dict(l=10, r=10, t=48, b=10),
+        title=f"Evolución temporal del cash flow - {currency_label}",
+        xaxis_title="Fecha",
+        yaxis_title="Saldo acumulado",
+        hovermode="x unified",
+        showlegend=False,
+    )
+    fig.update_xaxes(gridcolor="rgba(255,255,255,0.08)")
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.08)")
+    return fig
+
+
+def build_distribution_figure(frame: pd.DataFrame, currency: str):
+    currency_label, symbol = _currency_meta(currency)
+    if frame.empty:
+        fig = go.Figure()
+        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por origen - {currency_label}")
+        return fig
+
+    label_col = "Categoria" if frame["Categoria"].fillna("").astype(str).str.strip().any() else "Origen"
+    base = frame.copy()
+    base[label_col] = base[label_col].fillna("").astype(str).str.strip()
+    base[label_col] = base[label_col].replace("", "Sin clasificar")
+    values = pd.to_numeric(base["Monto"], errors="coerce").fillna(0.0).abs()
+    grouped = base.assign(_valor=values).groupby(label_col, as_index=False)["_valor"].sum().sort_values("_valor", ascending=False)
+    grouped = grouped[grouped["_valor"] > 0]
+
+    if grouped.empty:
+        fig = go.Figure()
+        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por origen - {currency_label}")
+        return fig
+
+    colors = px.colors.sequential.Viridis[: max(len(grouped), 3)]
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=grouped[label_col],
+                values=grouped["_valor"],
+                hole=0.62,
+                sort=False,
+                textinfo="none",
+                marker=dict(colors=colors[: len(grouped)], line=dict(color="rgba(255,255,255,0.12)", width=1)),
+                hovertemplate="%{label}<br>%{percent} del total<br>Valor: " + symbol + " %{value:,.2f}<extra></extra>",
+            )
+        ]
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        height=360,
+        margin=dict(l=10, r=10, t=48, b=10),
+        title=f"Distribución por {label_col.lower()} - {currency_label}",
+        showlegend=True,
+        legend_title_text=label_col,
+    )
+    return fig
+
+
+def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
+    table_df = frame.drop(columns=["Fecha_dt"], errors="ignore").copy()
+    if "Fecha_display" in table_df.columns:
+        table_df["Fecha"] = table_df["Fecha_display"]
+        table_df.drop(columns=["Fecha_display"], inplace=True, errors="ignore")
+
+    visible_columns = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria"] if col in table_df.columns]
+    other_columns = [col for col in table_df.columns if col not in visible_columns]
+    table_df = table_df[visible_columns + other_columns]
+
+    symbol = _currency_meta(currency)[1]
+    money_format = f"{symbol} %,.2f"
+    column_config: dict[str, object] = {}
+
+    if "Fecha" in table_df.columns:
+        column_config["Fecha"] = st.column_config.DateColumn("Fecha", format="DD/MM/YYYY")
+    if "Monto" in table_df.columns:
+        column_config["Monto"] = st.column_config.NumberColumn("Monto", format=money_format)
+    if "Tipo" in table_df.columns:
+        column_config["Tipo"] = st.column_config.TextColumn("Tipo")
+    if "Origen" in table_df.columns:
+        column_config["Origen"] = st.column_config.TextColumn("Origen")
+    if "Categoria" in table_df.columns:
+        column_config["Categoria"] = st.column_config.TextColumn("Categoría")
+    if "Descripción" in table_df.columns:
+        column_config["Descripción"] = st.column_config.TextColumn("Descripción")
+
+    st.dataframe(
+        table_df.style.map(style_tipo, subset=["Tipo"]) if "Tipo" in table_df.columns else table_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config,
+    )
+
+
+def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
+    label, _ = _currency_meta(currency)
+    st.markdown(f"### {label}")
+    filtered, _ = render_dashboard_filters(frame, currency)
+
+    if filtered.empty:
+        st.info("No hay movimientos para los filtros seleccionados.")
+        return
+
+    st.markdown(
+        f"<div style='margin: 0.5rem 0 1rem 0; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
+        f"{len(filtered)} movimientos visibles</div>",
+        unsafe_allow_html=True,
+    )
+
+    render_dashboard_kpis(filtered, currency)
+
+    chart_left, chart_right = st.columns(2)
+    with chart_left:
+        st.plotly_chart(build_cashflow_figure(filtered, currency), use_container_width=True)
+    with chart_right:
+        st.plotly_chart(build_distribution_figure(filtered, currency), use_container_width=True)
+
+    st.markdown("### Detalle de transacciones")
+    render_dashboard_detail_table(filtered, currency)
+
+    with st.expander("Ver base cruda y auditoría"):
+        raw_df = frame.drop(columns=["Fecha_dt"], errors="ignore").copy()
+        if "Fecha_display" in raw_df.columns:
+            raw_df["Fecha"] = raw_df["Fecha_display"]
+            raw_df.drop(columns=["Fecha_display"], inplace=True, errors="ignore")
+        raw_df = raw_df.dropna(axis=1, how="all")
+        st.dataframe(raw_df, use_container_width=True, hide_index=True)
 
 
 def render_upload_tab() -> None:
@@ -397,6 +807,9 @@ def render_upload_tab() -> None:
 
 def render_dashboard_tab() -> None:
     st.title("Tablero de Resumen")
+    st.caption("Panel analítico financiero para seguimiento ejecutivo de caja, ingresos y egresos.")
+
+    _dashboard_css()
 
     try:
         df = load_db_data()
@@ -408,91 +821,14 @@ def render_dashboard_tab() -> None:
         st.info("No hay datos para mostrar.")
         return
 
-    df = df.copy()
+    dashboard_df = normalize_dashboard_frame(df)
+    tabs = st.tabs(["Pesos (ARS)", "Dólares (USD)"])
 
-    df["Fecha"] = format_date_column(df.get("Fecha"))
+    with tabs[0]:
+        render_dashboard_currency_panel(dashboard_df[dashboard_df["Moneda"] == "ARS"].copy(), "ARS")
 
-    if "Categoría" in df.columns and "Categoria" not in df.columns:
-        df.rename(columns={"Categoría": "Categoria"}, inplace=True)
-
-    for col in ["Origen", "Tipo", "Categoria", "Descripción"]:
-        if col not in df.columns:
-            df[col] = ""
-
-    df["Moneda"] = df["Origen"].astype(str).str.upper().apply(
-        lambda x: "USD" if any(token in x for token in ["USD", "U$S", "DOLARES", "DÓLARES"]) else "ARS"
-    )
-
-    moneda_filter = st.selectbox("Moneda", options=["Todas", "ARS", "USD"], index=0)
-
-    origenes = sorted([x for x in df["Origen"].dropna().astype(str).unique().tolist() if x])
-    origen_filter = st.multiselect("Filtrar por Origen", options=origenes, default=origenes)
-
-    filtered = df.copy()
-    if origen_filter:
-        filtered = filtered[filtered["Origen"].isin(origen_filter)]
-    if moneda_filter != "Todas":
-        filtered = filtered[filtered["Moneda"] == moneda_filter]
-
-    def render_metrics(frame: pd.DataFrame, currency: str) -> None:
-        if frame.empty:
-            st.info(f"No hay movimientos en {currency}.")
-            return
-
-        ingresos = frame.loc[frame["Tipo"].astype(str).str.lower() == "ingreso", "Monto"].sum()
-        egresos = frame.loc[frame["Tipo"].astype(str).str.lower() == "egreso", "Monto"].sum()
-        saldo = ingresos - egresos
-
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Total de Ingresos", format_money_premium(ingresos, currency))
-        k2.metric("Total de Egresos", format_money_premium(egresos, currency))
-        k3.metric("Saldo Neto", format_money_premium(saldo, currency))
-
-    if moneda_filter == "Todas":
-        st.subheader("Pesos (ARS)")
-        ars_frame = filtered[filtered["Moneda"] == "ARS"]
-        render_metrics(ars_frame, "ARS")
-        st.write("---")
-        st.subheader("Dólares (USD)")
-        usd_frame = filtered[filtered["Moneda"] == "USD"]
-        render_metrics(usd_frame, "USD")
-    else:
-        render_metrics(filtered, moneda_filter)
-
-    st.subheader("Resumen por origen")
-    summary_source = filtered.copy()
-    if "Origen" not in summary_source.columns:
-        summary_source["Origen"] = ""
-    summary_source["Origen"] = summary_source["Origen"].astype(str)
-    grouped = summary_source.groupby("Origen", dropna=False)
-    summary_rows = []
-    for origen, group in grouped:
-        ingresos, egresos, diferencia = compute_totals(group)
-        summary_rows.append({
-            "Origen": origen or "Sin origen",
-            "Ingresos": format_money_premium(ingresos, origen),
-            "Egresos": format_money_premium(egresos, origen),
-            "Diferencia": format_money_premium(diferencia, origen),
-        })
-    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-
-    st.write("### Detalle de Transacciones")
-    display_df = filtered.drop(columns=["ID"], errors="ignore").copy()
-    display_df = display_df.dropna(axis=1, how="all")
-    if "Monto" in display_df.columns:
-        display_df["Monto"] = format_amount_series(display_df["Monto"])
-    if "Moneda" not in display_df.columns:
-        origen_source = display_df["Origen"] if "Origen" in display_df.columns else pd.Series([""] * len(display_df), index=display_df.index)
-        display_df["Moneda"] = origen_source.astype(str).str.upper().apply(
-            lambda x: "USD" if any(token in x for token in ["USD", "U$S", "DOLARES", "DÓLARES"]) else "ARS"
-        )
-
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        column_config={"Moneda": st.column_config.TextColumn("Moneda")},
-        hide_index=True
-    )
+    with tabs[1]:
+        render_dashboard_currency_panel(dashboard_df[dashboard_df["Moneda"] == "USD"].copy(), "USD")
 if "view" not in st.session_state:
     st.session_state["view"] = "dashboard"
 
