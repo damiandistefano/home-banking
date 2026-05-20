@@ -289,9 +289,10 @@ def normalize_dashboard_frame(df: pd.DataFrame) -> pd.DataFrame:
     dashboard_df["Fecha_display"] = dashboard_df["Fecha_dt"].dt.date
     dashboard_df["Monto"] = pd.to_numeric(dashboard_df.get("Monto"), errors="coerce").fillna(0.0)
     dashboard_df["Origen"] = dashboard_df["Origen"].fillna("").astype(str)
+    dashboard_df["Cuenta"] = dashboard_df["Origen"]
     dashboard_df["Tipo"] = dashboard_df["Tipo"].fillna("").astype(str)
-    dashboard_df["Categoria"] = dashboard_df["Categoria"].fillna("").astype(str)
     dashboard_df["Descripción"] = dashboard_df["Descripción"].fillna("").astype(str)
+    dashboard_df = dashboard_df.drop(columns=["Categoria"], errors="ignore")
     dashboard_df["Moneda"] = dashboard_df["Origen"].str.upper().apply(
         lambda x: "USD" if any(token in x for token in ["USD", "U$S", "DOLARES", "DÓLARES"]) else "ARS"
     )
@@ -456,9 +457,9 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
 
     origin_options = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
     with filter_cols[2]:
-        st.markdown("<div class='dash-filter-label'>Origen</div>", unsafe_allow_html=True)
+        st.markdown("<div class='dash-filter-label'>Cuenta</div>", unsafe_allow_html=True)
         st.multiselect(
-            "Origen",
+            "Cuenta",
             options=origin_options,
             default=st.session_state[origin_key],
             key=origin_key,
@@ -479,15 +480,25 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
     search_text = str(st.session_state[search_key]).strip().lower()
 
     filtered = frame.copy()
-    filtered = filtered[(filtered["Fecha_dt"].dt.date >= selected_range[0]) & (filtered["Fecha_dt"].dt.date <= selected_range[1])]
+    if isinstance(selected_range, (list, tuple)):
+        if len(selected_range) == 2:
+            start_date, end_date = selected_range
+            filtered = filtered[(filtered["Fecha_dt"].dt.date >= start_date) & (filtered["Fecha_dt"].dt.date <= end_date)]
+        elif len(selected_range) == 1:
+            start_date = selected_range[0]
+            if hasattr(start_date, "year"):
+                filtered = filtered[filtered["Fecha_dt"].dt.date >= start_date]
+    else:
+        if hasattr(selected_range, "year"):
+            filtered = filtered[filtered["Fecha_dt"].dt.date >= selected_range]
     if selected_origins:
-        filtered = filtered[filtered["Origen"].isin(selected_origins)]
+        filtered = filtered[filtered["Cuenta"].isin(selected_origins)]
     else:
         filtered = filtered.iloc[0:0]
 
     if search_text:
         search_blob = (
-            filtered[[c for c in ["Descripción", "Origen", "Categoria", "Tipo"] if c in filtered.columns]]
+            filtered[[c for c in ["Descripción", "Cuenta", "Tipo"] if c in filtered.columns]]
             .fillna("")
             .astype(str)
             .agg(" ".join, axis=1)
@@ -547,10 +558,10 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
     currency_label, symbol = _currency_meta(currency)
     if frame.empty:
         fig = go.Figure()
-        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por origen - {currency_label}")
+        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
         return fig
 
-    label_col = "Categoria" if frame["Categoria"].fillna("").astype(str).str.strip().any() else "Origen"
+    label_col = "Cuenta" if "Cuenta" in frame.columns else "Origen"
     base = frame.copy()
     base[label_col] = base[label_col].fillna("").astype(str).str.strip()
     base[label_col] = base[label_col].replace("", "Sin clasificar")
@@ -560,7 +571,7 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
 
     if grouped.empty:
         fig = go.Figure()
-        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por origen - {currency_label}")
+        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
         return fig
 
     colors = px.colors.sequential.Viridis[: max(len(grouped), 3)]
@@ -581,9 +592,9 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
         template="plotly_dark",
         height=360,
         margin=dict(l=10, r=10, t=48, b=10),
-        title=f"Distribución por {label_col.lower()} - {currency_label}",
+        title=f"Distribución por cuenta - {currency_label}",
         showlegend=True,
-        legend_title_text=label_col,
+        legend_title_text="Cuenta",
     )
     return fig
 
@@ -593,8 +604,11 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
     if "Fecha_display" in table_df.columns:
         table_df["Fecha"] = table_df["Fecha_display"]
         table_df.drop(columns=["Fecha_display"], inplace=True, errors="ignore")
+    table_df = table_df.drop(columns=["ID", "Categoria", "Origen"], errors="ignore")
+    if "Cuenta" not in table_df.columns and "Origen" in frame.columns:
+        table_df["Cuenta"] = frame["Origen"]
 
-    visible_columns = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria"] if col in table_df.columns]
+    visible_columns = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Cuenta"] if col in table_df.columns]
     other_columns = [col for col in table_df.columns if col not in visible_columns]
     table_df = table_df[visible_columns + other_columns]
 
@@ -608,10 +622,8 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
         column_config["Monto"] = st.column_config.NumberColumn("Monto", format=money_format)
     if "Tipo" in table_df.columns:
         column_config["Tipo"] = st.column_config.TextColumn("Tipo")
-    if "Origen" in table_df.columns:
-        column_config["Origen"] = st.column_config.TextColumn("Origen")
-    if "Categoria" in table_df.columns:
-        column_config["Categoria"] = st.column_config.TextColumn("Categoría")
+    if "Cuenta" in table_df.columns:
+        column_config["Cuenta"] = st.column_config.TextColumn("Cuenta")
     if "Descripción" in table_df.columns:
         column_config["Descripción"] = st.column_config.TextColumn("Descripción")
 
@@ -654,6 +666,9 @@ def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
         if "Fecha_display" in raw_df.columns:
             raw_df["Fecha"] = raw_df["Fecha_display"]
             raw_df.drop(columns=["Fecha_display"], inplace=True, errors="ignore")
+        raw_df = raw_df.drop(columns=["ID", "Categoria", "Origen"], errors="ignore")
+        if "Cuenta" not in raw_df.columns and "Origen" in frame.columns:
+            raw_df["Cuenta"] = frame["Origen"]
         raw_df = raw_df.dropna(axis=1, how="all")
         st.dataframe(raw_df, use_container_width=True, hide_index=True)
 
