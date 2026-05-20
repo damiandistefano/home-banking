@@ -405,18 +405,56 @@ def _dashboard_css() -> None:
     )
 
 
-def render_kpi_card(title: str, value: str, meta: str, trend: str = "neutral", emphasize: bool = False) -> None:
-    badge_text = {"up": "↗ tendencia positiva", "down": "↘ salida de fondos", "neutral": "• seguimiento"}.get(trend, "• seguimiento")
-    trend_class = trend if trend in {"up", "down"} else "neutral"
-    value_class = "dash-kpi-value neto" if emphasize else "dash-kpi-value"
+def render_kpi_card(title: str, value: str, delta: str | None = None, help_text: str | None = None) -> None:
+    st.metric(label=title, value=value, delta=delta, help=help_text)
+
+
+def _render_metric_cards_css() -> None:
     st.markdown(
-        f"""
-        <div class="dash-kpi">
-          <div class="dash-kpi-label">{title}</div>
-          <div class="{value_class}">{value}</div>
-          <div class="dash-kpi-meta">{meta}</div>
-          <div class="dash-badge {trend_class}">{badge_text}</div>
-        </div>
+        """
+        <style>
+        .metric-card {
+            background: #1E1E1E;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 1.1rem 1.15rem;
+            height: 100%;
+            box-sizing: border-box;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+        }
+        .metric-card.income {
+            background: rgba(0, 255, 0, 0.03);
+            border-left: 3px solid rgba(34, 197, 94, 0.65);
+        }
+        .metric-card.expense {
+            background: rgba(255, 0, 0, 0.03);
+            border-left: 3px solid rgba(239, 68, 68, 0.65);
+        }
+        .metric-card.neto {
+            background: #1E1E1E;
+        }
+        .metric-label {
+            font-size: 0.95rem;
+            font-weight: 800;
+            color: #F5F7FA;
+            letter-spacing: 0.02em;
+            margin-bottom: 0.55rem;
+        }
+        .metric-value {
+            font-size: 2.1rem;
+            font-weight: 900;
+            line-height: 1;
+            color: #FFFFFF;
+        }
+        .metric-trend {
+            margin-top: 0.6rem;
+            font-size: 0.88rem;
+            font-weight: 700;
+            opacity: 0.8;
+        }
+        .metric-trend.up { color: #7CFF9B; }
+        .metric-trend.down { color: #FF8A8A; }
+        </style>
         """,
         unsafe_allow_html=True,
     )
@@ -425,15 +463,41 @@ def render_kpi_card(title: str, value: str, meta: str, trend: str = "neutral", e
 def render_dashboard_kpis(frame: pd.DataFrame, currency: str) -> None:
     ingresos, egresos, neto = calculate_dashboard_totals(frame)
     symbol = _currency_meta(currency)[1]
-    net_trend = "up" if neto >= 0 else "down"
+    net_delta = "Tendencia positiva" if neto >= 0 else "Tendencia negativa"
 
+    _render_metric_cards_css()
     c1, c2, c3 = st.columns(3)
     with c1:
-        render_kpi_card("Saldo Neto", _format_currency_value(neto, symbol), "Resultado acumulado del período", net_trend, emphasize=True)
+        st.markdown(
+            f"""
+            <div class="metric-card neto">
+              <div class="metric-label">Saldo Neto</div>
+              <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
+              <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     with c2:
-        render_kpi_card("Ingresos", _format_currency_value(ingresos, symbol), "Entradas de dinero filtradas", "up")
+        st.markdown(
+            f"""
+            <div class="metric-card income">
+              <div class="metric-label">Ingresos</div>
+              <div class="metric-value">{_format_currency_value(ingresos, symbol)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     with c3:
-        render_kpi_card("Egresos", _format_currency_value(egresos, symbol), "Salidas de dinero filtradas", "down")
+        st.markdown(
+            f"""
+            <div class="metric-card expense">
+              <div class="metric-label">Egresos</div>
+              <div class="metric-value">{_format_currency_value(egresos, symbol)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.DataFrame, str]:
