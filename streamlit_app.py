@@ -242,6 +242,25 @@ def render_individual_file_card(file_name: str, ingresos: float, egresos: float,
     )
 
 
+def render_account_summary_card(account_name: str, ingresos: float, egresos: float, neto: float, currency: str) -> None:
+    label = f"Resumen de Cuenta: {account_name} ({currency})"
+    render_individual_file_card(label, ingresos, egresos, neto, currency)
+
+
+def resolve_file_account_label(frame: pd.DataFrame) -> str:
+    if "Origen" not in frame.columns:
+        return "Sin cuenta"
+
+    values = [str(value).strip() for value in frame["Origen"].dropna().astype(str).tolist() if str(value).strip()]
+    unique_values = list(dict.fromkeys(values))
+
+    if not unique_values:
+        return "Sin cuenta"
+    if len(unique_values) == 1:
+        return unique_values[0]
+    return ", ".join(unique_values[:2]) + ("..." if len(unique_values) > 2 else "")
+
+
 def style_tipo(val):
     if str(val).lower() == "ingreso":
         return "background-color: rgba(34, 197, 94, 0.14); color: #9ef0b2; font-weight: 700; border-radius: 999px; padding: 0.15rem 0.45rem;"
@@ -386,18 +405,56 @@ def _dashboard_css() -> None:
     )
 
 
-def render_kpi_card(title: str, value: str, meta: str, trend: str = "neutral", emphasize: bool = False) -> None:
-    badge_text = {"up": "↗ tendencia positiva", "down": "↘ salida de fondos", "neutral": "• seguimiento"}.get(trend, "• seguimiento")
-    trend_class = trend if trend in {"up", "down"} else "neutral"
-    value_class = "dash-kpi-value neto" if emphasize else "dash-kpi-value"
+def render_kpi_card(title: str, value: str, delta: str | None = None, help_text: str | None = None) -> None:
+    st.metric(label=title, value=value, delta=delta, help=help_text)
+
+
+def _render_metric_cards_css() -> None:
     st.markdown(
-        f"""
-        <div class="dash-kpi">
-          <div class="dash-kpi-label">{title}</div>
-          <div class="{value_class}">{value}</div>
-          <div class="dash-kpi-meta">{meta}</div>
-          <div class="dash-badge {trend_class}">{badge_text}</div>
-        </div>
+        """
+        <style>
+        .metric-card {
+            background: #1E1E1E;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 1.1rem 1.15rem;
+            height: 100%;
+            box-sizing: border-box;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+        }
+        .metric-card.income {
+            background: rgba(0, 255, 0, 0.03);
+            border-left: 3px solid rgba(34, 197, 94, 0.65);
+        }
+        .metric-card.expense {
+            background: rgba(255, 0, 0, 0.03);
+            border-left: 3px solid rgba(239, 68, 68, 0.65);
+        }
+        .metric-card.neto {
+            background: #1E1E1E;
+        }
+        .metric-label {
+            font-size: 0.95rem;
+            font-weight: 800;
+            color: #F5F7FA;
+            letter-spacing: 0.02em;
+            margin-bottom: 0.55rem;
+        }
+        .metric-value {
+            font-size: 2.1rem;
+            font-weight: 900;
+            line-height: 1;
+            color: #FFFFFF;
+        }
+        .metric-trend {
+            margin-top: 0.6rem;
+            font-size: 0.88rem;
+            font-weight: 700;
+            opacity: 0.8;
+        }
+        .metric-trend.up { color: #7CFF9B; }
+        .metric-trend.down { color: #FF8A8A; }
+        </style>
         """,
         unsafe_allow_html=True,
     )
@@ -406,15 +463,41 @@ def render_kpi_card(title: str, value: str, meta: str, trend: str = "neutral", e
 def render_dashboard_kpis(frame: pd.DataFrame, currency: str) -> None:
     ingresos, egresos, neto = calculate_dashboard_totals(frame)
     symbol = _currency_meta(currency)[1]
-    net_trend = "up" if neto >= 0 else "down"
+    net_delta = "Tendencia positiva" if neto >= 0 else "Tendencia negativa"
 
+    _render_metric_cards_css()
     c1, c2, c3 = st.columns(3)
     with c1:
-        render_kpi_card("Saldo Neto", _format_currency_value(neto, symbol), "Resultado acumulado del período", net_trend, emphasize=True)
+        st.markdown(
+            f"""
+            <div class="metric-card neto">
+              <div class="metric-label">Saldo Neto</div>
+              <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
+              <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     with c2:
-        render_kpi_card("Ingresos", _format_currency_value(ingresos, symbol), "Entradas de dinero filtradas", "up")
+        st.markdown(
+            f"""
+            <div class="metric-card income">
+              <div class="metric-label">Ingresos</div>
+              <div class="metric-value">{_format_currency_value(ingresos, symbol)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     with c3:
-        render_kpi_card("Egresos", _format_currency_value(egresos, symbol), "Salidas de dinero filtradas", "down")
+        st.markdown(
+            f"""
+            <div class="metric-card expense">
+              <div class="metric-label">Egresos</div>
+              <div class="metric-value">{_format_currency_value(egresos, symbol)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.DataFrame, str]:
@@ -661,17 +744,6 @@ def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     st.markdown("### Detalle de transacciones")
     render_dashboard_detail_table(filtered, currency)
 
-    with st.expander("Ver base cruda y auditoría"):
-        raw_df = frame.drop(columns=["Fecha_dt"], errors="ignore").copy()
-        if "Fecha_display" in raw_df.columns:
-            raw_df["Fecha"] = raw_df["Fecha_display"]
-            raw_df.drop(columns=["Fecha_display"], inplace=True, errors="ignore")
-        raw_df = raw_df.drop(columns=["ID", "Categoria", "Origen"], errors="ignore")
-        if "Cuenta" not in raw_df.columns and "Origen" in frame.columns:
-            raw_df["Cuenta"] = frame["Origen"]
-        raw_df = raw_df.dropna(axis=1, how="all")
-        st.dataframe(raw_df, use_container_width=True, hide_index=True)
-
 
 def render_upload_tab() -> None:
     st.subheader("Cargar movimientos")
@@ -741,6 +813,7 @@ def render_upload_tab() -> None:
                     "Egresos": egresos,
                     "Diferencia": diferencia,
                     "Moneda": currency,
+                    "Cuenta": resolve_file_account_label(file_df),
                 }
             except Exception as exc:
                 st.error(f"Error al procesar {uploaded_file.name}: {exc}")
@@ -768,25 +841,28 @@ def render_upload_tab() -> None:
         if totals:
             render_currency_summary_block(currency, totals["Ingresos"], totals["Egresos"], totals["Neto"])
 
-    with st.expander("Ver desglose por archivo"):
-        if not file_summaries:
-            st.info("No hubo archivos válidos para desglosar.")
-        else:
-            for file_name, summary in file_summaries.items():
-                render_individual_file_card(
-                    file_name,
-                    summary["Ingresos"],
-                    summary["Egresos"],
-                    summary["Diferencia"],
-                    summary["Moneda"],
-                )
+    if len(uploaded_files) >= 2:
+        with st.expander("Ver desglose por archivo"):
+            if not file_summaries:
+                st.info("No hubo archivos válidos para desglosar.")
+            else:
+                for file_name, summary in file_summaries.items():
+                    render_account_summary_card(
+                        summary.get("Cuenta", file_name),
+                        summary["Ingresos"],
+                        summary["Egresos"],
+                        summary["Diferencia"],
+                        summary["Moneda"],
+                    )
 
     st.subheader("Vista previa de los datos")
-    df_vista_previa = df_para_sheets.drop(columns=["ID"], errors="ignore").copy()
+    df_vista_previa = df_para_sheets.drop(columns=["ID", "Categoria", "Categoría"], errors="ignore").copy()
+    if "Origen" in df_vista_previa.columns:
+        df_vista_previa.rename(columns={"Origen": "Cuenta"}, inplace=True)
     if "Fecha" in df_vista_previa.columns:
         df_vista_previa["Fecha"] = format_date_column(df_vista_previa["Fecha"])
     if "Monto" in df_vista_previa.columns:
-        origins = df_vista_previa["Origen"] if "Origen" in df_vista_previa.columns else pd.Series([""] * len(df_vista_previa), index=df_vista_previa.index)
+        origins = df_vista_previa["Cuenta"] if "Cuenta" in df_vista_previa.columns else pd.Series([""] * len(df_vista_previa), index=df_vista_previa.index)
         df_vista_previa["Monto"] = format_money_series_with_origin(df_vista_previa["Monto"], origins)
 
     st.markdown(
@@ -794,7 +870,25 @@ def render_upload_tab() -> None:
         unsafe_allow_html=True,
     )
 
-    st.dataframe(df_vista_previa.style.map(style_tipo, subset=["Tipo"]), use_container_width=True, hide_index=True)
+    editor_df = df_vista_previa.copy()
+    if "Descripción" not in editor_df.columns:
+        editor_df["Descripción"] = ""
+
+    editor_columns = {column: st.column_config.Column(column) for column in editor_df.columns if column != "Descripción"}
+    editor_columns["Descripción"] = st.column_config.TextColumn("Descripción")
+
+    edited_preview = st.data_editor(
+        editor_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=editor_columns,
+        disabled=[col for col in editor_df.columns if col != "Descripción"],
+        key="upload_preview_editor",
+    )
+
+    df_vista_previa = edited_preview.copy()
+    if "Descripción" in df_vista_previa.columns and "Descripción" in df_para_sheets.columns:
+        df_para_sheets.loc[df_vista_previa.index, "Descripción"] = df_vista_previa["Descripción"].astype(str).values
 
     if st.button("🚀 Confirmar y Subir", type="primary"):
         with st.spinner("Subiendo datos..."):
@@ -821,10 +915,16 @@ def render_upload_tab() -> None:
 
 
 def render_dashboard_tab() -> None:
-    st.title("Tablero de Resumen")
-    st.caption("Panel analítico financiero para seguimiento ejecutivo de caja, ingresos y egresos.")
-
     _dashboard_css()
+
+    header_left, header_right = st.columns([5, 1])
+    with header_left:
+        st.title("Home Banking")
+        st.subheader("Dashboard Financiero")
+    with header_right:
+        st.markdown("<div style='height:0.45rem;'></div>", unsafe_allow_html=True)
+        if st.button("Upload", use_container_width=True):
+            st.session_state["view"] = "upload"
 
     try:
         df = load_db_data()
@@ -847,12 +947,10 @@ def render_dashboard_tab() -> None:
 if "view" not in st.session_state:
     st.session_state["view"] = "dashboard"
 
-header_left, header_right = st.columns([5, 1])
-with header_left:
-    st.title("Home-Banking")
-with header_right:
-    if st.button("Upload", use_container_width=True):
-        st.session_state["view"] = "upload"
+st.markdown(
+    "<div style='height:0.15rem;'></div>",
+    unsafe_allow_html=True,
+)
 
 if st.session_state["view"] == "dashboard":
     render_dashboard_tab()
