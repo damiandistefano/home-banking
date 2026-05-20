@@ -1,3 +1,5 @@
 .venv/
-__pycache__/ç
+__pycache__/
 .DS_Store
+.datos_banco.txt
+*.pyc
