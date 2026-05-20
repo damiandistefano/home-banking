@@ -768,25 +768,28 @@ def render_upload_tab() -> None:
         if totals:
             render_currency_summary_block(currency, totals["Ingresos"], totals["Egresos"], totals["Neto"])
 
-    with st.expander("Ver desglose por archivo"):
-        if not file_summaries:
-            st.info("No hubo archivos válidos para desglosar.")
-        else:
-            for file_name, summary in file_summaries.items():
-                render_individual_file_card(
-                    file_name,
-                    summary["Ingresos"],
-                    summary["Egresos"],
-                    summary["Diferencia"],
-                    summary["Moneda"],
-                )
+    if len(uploaded_files) >= 2:
+        with st.expander("Ver desglose por archivo"):
+            if not file_summaries:
+                st.info("No hubo archivos válidos para desglosar.")
+            else:
+                for file_name, summary in file_summaries.items():
+                    render_individual_file_card(
+                        file_name,
+                        summary["Ingresos"],
+                        summary["Egresos"],
+                        summary["Diferencia"],
+                        summary["Moneda"],
+                    )
 
     st.subheader("Vista previa de los datos")
-    df_vista_previa = df_para_sheets.drop(columns=["ID"], errors="ignore").copy()
+    df_vista_previa = df_para_sheets.drop(columns=["ID", "Categoria", "Categoría"], errors="ignore").copy()
+    if "Origen" in df_vista_previa.columns:
+        df_vista_previa.rename(columns={"Origen": "Cuenta"}, inplace=True)
     if "Fecha" in df_vista_previa.columns:
         df_vista_previa["Fecha"] = format_date_column(df_vista_previa["Fecha"])
     if "Monto" in df_vista_previa.columns:
-        origins = df_vista_previa["Origen"] if "Origen" in df_vista_previa.columns else pd.Series([""] * len(df_vista_previa), index=df_vista_previa.index)
+        origins = df_vista_previa["Cuenta"] if "Cuenta" in df_vista_previa.columns else pd.Series([""] * len(df_vista_previa), index=df_vista_previa.index)
         df_vista_previa["Monto"] = format_money_series_with_origin(df_vista_previa["Monto"], origins)
 
     st.markdown(
@@ -794,7 +797,12 @@ def render_upload_tab() -> None:
         unsafe_allow_html=True,
     )
 
-    st.dataframe(df_vista_previa.style.map(style_tipo, subset=["Tipo"]), use_container_width=True, hide_index=True)
+    st.dataframe(
+        df_vista_previa.style.map(style_tipo, subset=["Tipo"]),
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Cuenta": st.column_config.TextColumn("Cuenta")},
+    )
 
     if st.button("🚀 Confirmar y Subir", type="primary"):
         with st.spinner("Subiendo datos..."):
