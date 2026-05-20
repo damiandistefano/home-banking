@@ -851,10 +851,16 @@ def render_upload_tab() -> None:
 
 
 def render_dashboard_tab() -> None:
-    st.title("Tablero de Resumen")
-    st.caption("Panel analítico financiero para seguimiento ejecutivo de caja, ingresos y egresos.")
-
     _dashboard_css()
+
+    header_left, header_right = st.columns([5, 1])
+    with header_left:
+        st.title("Home Banking")
+        st.subheader("Dashboard Financiero")
+    with header_right:
+        st.markdown("<div style='height:0.45rem;'></div>", unsafe_allow_html=True)
+        if st.button("Upload", use_container_width=True):
+            st.session_state["view"] = "upload"
 
     try:
         df = load_db_data()
@@ -877,12 +883,10 @@ def render_dashboard_tab() -> None:
 if "view" not in st.session_state:
     st.session_state["view"] = "dashboard"
 
-header_left, header_right = st.columns([5, 1])
-with header_left:
-    st.title("Home-Banking")
-with header_right:
-    if st.button("Upload", use_container_width=True):
-        st.session_state["view"] = "upload"
+st.markdown(
+    "<div style='height:0.15rem;'></div>",
+    unsafe_allow_html=True,
+)
 
 if st.session_state["view"] == "dashboard":
     render_dashboard_tab()
