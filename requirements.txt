@@ -1,5 +1,7 @@
 streamlit
 pandas
-gspread
 openpyxl
 xlrd
+psycopg2-binary
+SQLAlchemy
+plotly
