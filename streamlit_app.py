@@ -5,35 +5,35 @@ import pandas as pd
 import streamlit as st
 
 from transaction_uploader import (
-    GOOGLE_SCOPES,
     OUTPUT_COLUMNS,
     normalize_sheet,
     read_excel_sheets,
     upload_dataframe,
-    load_service_account_info,
+    get_database_url,
 )
-
-# SPREADSHEET_ID = "15EEuMOCws2hPp6sw6Nfpd8lBu9AazCtctgmLENHsyh4" # Real
-SPREADSHEET_ID = "1_AgKWi22JQxYCdrGmQn5aA_YT2zHs1fvVbZvCS9ARx8" # Prueba
 
 st.set_page_config(page_title="Importador de transacciones", layout="wide")
 
 
 @st.cache_data(ttl=300)
-def load_sheet_data() -> pd.DataFrame:
-    import gspread
-    from google.oauth2.service_account import Credentials
+def load_db_data() -> pd.DataFrame:
+    import psycopg2
 
-    service_account_info = load_service_account_info()
-    if not service_account_info:
-        raise FileNotFoundError("Falta la credencial. Guardá el JSON en ./.datos_banco.txt")
+    query = """
+        select
+          id as "ID",
+          fecha as "Fecha",
+          descripcion as "Descripción",
+          monto as "Monto",
+          tipo as "Tipo",
+          origen as "Origen",
+          categoria as "Categoria"
+        from movimientos
+        order by fecha desc, id desc
+    """
 
-    credentials = Credentials.from_service_account_info(service_account_info, scopes=GOOGLE_SCOPES)
-    client = gspread.authorize(credentials)
-    
-    worksheet = client.open_by_key(SPREADSHEET_ID).worksheet("Movimientos")
-    rows = worksheet.get_all_records(value_render_option="UNFORMATTED_VALUE")
-    return pd.DataFrame(rows)
+    with psycopg2.connect(get_database_url()) as conn:
+        return pd.read_sql_query(query, conn)
 
 
 def format_date_column(series: pd.Series) -> pd.Series:
@@ -256,7 +256,7 @@ def render_upload_tab() -> None:
 
     left_col, right_col = st.columns([4, 1])
     with left_col:
-        st.write("Subí un archivo Excel para actualizar la planilla general.")
+        st.write("Subí un archivo Excel para actualizar la base general.")
 
     with right_col:
         uploaded_file = st.file_uploader(
@@ -357,7 +357,7 @@ def render_upload_tab() -> None:
                 )
 
     st.subheader("Vista previa de los datos")
-    df_vista_previa = df_para_sheets.drop(columns=["ID", "Referencia"], errors="ignore").copy()
+    df_vista_previa = df_para_sheets.drop(columns=["ID"], errors="ignore").copy()
     if "Fecha" in df_vista_previa.columns:
         df_vista_previa["Fecha"] = format_date_column(df_vista_previa["Fecha"])
     if "Monto" in df_vista_previa.columns:
@@ -371,11 +371,11 @@ def render_upload_tab() -> None:
 
     st.dataframe(df_vista_previa.style.map(style_tipo, subset=["Tipo"]), use_container_width=True, hide_index=True)
 
-    if st.button("🚀 Confirmar y Subir a Sheets", type="primary"):
-        with st.spinner("Subiendo datos a Google Sheets..."):
+    if st.button("🚀 Confirmar y Subir", type="primary"):
+        with st.spinner("Subiendo datos..."):
             try:
                 upload_result = upload_dataframe(df_para_sheets)
-                load_sheet_data.clear()
+                load_db_data.clear()
                 st.session_state["uploader_key_version"] += 1
             except Exception as exc:
                 st.error(f"Error al subir: {exc}")
@@ -384,8 +384,7 @@ def render_upload_tab() -> None:
         inserted = upload_result.get("inserted", 0)
 
         if inserted > 0:
-            st.success("¡Planilla general actualizada correctamente!")
-            st.balloons()
+            st.success("¡Base general actualizada correctamente!")
             st.session_state["subida_exitosa"] = True
             st.rerun()
         else:
@@ -400,9 +399,9 @@ def render_dashboard_tab() -> None:
     st.title("Tablero de Resumen")
 
     try:
-        df = load_sheet_data()
+        df = load_db_data()
     except Exception as exc:
-        st.error(f"No se pudieron cargar los datos de Google Sheets: {exc}")
+        st.error(f"No se pudieron cargar los datos de Neon: {exc}")
         return
 
     if df.empty:
@@ -461,8 +460,6 @@ def render_dashboard_tab() -> None:
         render_metrics(filtered, moneda_filter)
 
     st.subheader("Resumen por origen")
-    filtered = filtered.drop(columns=["Referencia"], errors="ignore")
-
     summary_source = filtered.copy()
     if "Origen" not in summary_source.columns:
         summary_source["Origen"] = ""
@@ -480,7 +477,7 @@ def render_dashboard_tab() -> None:
     st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
     st.write("### Detalle de Transacciones")
-    display_df = filtered.drop(columns=["ID", "Referencia"], errors="ignore").copy()
+    display_df = filtered.drop(columns=["ID"], errors="ignore").copy()
     display_df = display_df.dropna(axis=1, how="all")
     if "Monto" in display_df.columns:
         display_df["Monto"] = format_amount_series(display_df["Monto"])
