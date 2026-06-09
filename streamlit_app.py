@@ -19,6 +19,7 @@ from transaction_uploader import (
     restore_transactions,
     update_transaction,
 )
+from pdf_export import generate_monthly_pdf
 
 st.set_page_config(page_title="Importador de transacciones", layout="wide")
 
@@ -808,6 +809,47 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
             st.info("No se detectaron cambios.")
 
 
+def _render_pdf_download_button(filtered: pd.DataFrame, currency: str) -> None:
+    """Render a PDF download button for the currently visible filtered data."""
+    today = date.today()
+
+    # Determine the most representative month/year from filtered data
+    if not filtered.empty and "Fecha_dt" in filtered.columns:
+        valid_dates = filtered["Fecha_dt"].dropna()
+        if not valid_dates.empty:
+            ref_date = valid_dates.max()
+            mes, año = ref_date.month, ref_date.year
+        else:
+            mes, año = today.month, today.year
+    else:
+        mes, año = today.month, today.year
+
+    month_names = [
+        "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+    ]
+    btn_label = f"📄 Descargar PDF — {month_names[mes - 1]} {año} ({currency})"
+    file_name = f"resumen_{currency}_{mes:02d}_{año}.pdf"
+
+    try:
+        pdf_bytes = generate_monthly_pdf(filtered, mes, año, currency)
+    except Exception as exc:
+        st.warning(f"No se pudo generar el PDF: {exc}")
+        return
+
+    if pdf_bytes is None:
+        st.info("No hay movimientos para el período seleccionado. El PDF no fue generado.")
+        return
+
+    st.download_button(
+        label=btn_label,
+        data=pdf_bytes,
+        file_name=file_name,
+        mime="application/pdf",
+        key=f"pdf_download_{currency}",
+    )
+
+
 def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     label, _ = _currency_meta(currency)
     st.markdown(f"### {label}")
@@ -824,6 +866,9 @@ def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     )
 
     render_dashboard_kpis(filtered, currency)
+
+    # ── PDF download button ────────────────────────────────────────────────
+    _render_pdf_download_button(filtered, currency)
 
     chart_left, chart_right = st.columns(2)
     with chart_left:
