@@ -16,6 +16,7 @@ from transaction_uploader import (
     upload_dataframe,
     get_database_url,
     soft_delete_transactions,
+    restore_transactions,
     update_transaction,
 )
 
@@ -37,6 +38,28 @@ def load_db_data() -> pd.DataFrame:
           categoria as "Categoria"
         from movimientos
         where activo is distinct from false
+        order by fecha desc, id desc
+    """
+
+    with psycopg2.connect(get_database_url()) as conn:
+        return pd.read_sql_query(query, conn)
+
+
+@st.cache_data(ttl=300)
+def load_deleted_data() -> pd.DataFrame:
+    import psycopg2
+
+    query = """
+        select
+          id as "ID",
+          fecha as "Fecha",
+          descripcion as "Descripción",
+          monto as "Monto",
+          tipo as "Tipo",
+          origen as "Origen",
+          categoria as "Categoria"
+        from movimientos
+        where activo = false
         order by fecha desc, id desc
     """
 
@@ -764,6 +787,7 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
 
         if deleted_count or updated_count:
             load_db_data.clear()
+            load_deleted_data.clear()
             msgs = []
             if deleted_count:
                 msgs.append(f"{deleted_count} movimiento(s) eliminado(s)")
@@ -1058,6 +1082,57 @@ def render_upload_tab() -> None:
     st.download_button("Descargar CSV", csv_bytes, file_name="movimientos_normalizados.csv", mime="text/csv")
 
 
+def render_trash_tab() -> None:
+    st.markdown("### 🗑️ Papelera de reciclaje")
+    st.caption("Acá se muestran los movimientos eliminados. Podés recuperarlos marcándolos y haciendo clic en Restaurar.")
+
+    try:
+        df = load_deleted_data()
+    except Exception as exc:
+        st.error(f"No se pudieron cargar los movimientos eliminados: {exc}")
+        return
+
+    if df.empty:
+        st.info("No hay movimientos eliminados.")
+        return
+
+    dashboard_df = normalize_dashboard_frame(df)
+    dashboard_df["Restaurar"] = False
+
+    visible_cols = ["Restaurar", "Fecha", "Descripción", "Monto", "Tipo", "Origen", "ID"]
+    table_df = dashboard_df.reindex(columns=[c for c in visible_cols if c in dashboard_df.columns or c == "Restaurar"])
+    if "Fecha_display" in dashboard_df.columns:
+        table_df["Fecha"] = dashboard_df["Fecha_display"]
+    table_df = table_df[[c for c in visible_cols if c in table_df.columns]]
+
+    column_config = {
+        "Restaurar": st.column_config.CheckboxColumn("Restaurar", help="Marcá para recuperar este movimiento"),
+        "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY", disabled=True),
+        "Monto": st.column_config.NumberColumn("Monto", format="$ %,.2f", disabled=True),
+        "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
+        "Descripción": st.column_config.TextColumn("Descripción", disabled=True),
+        "Origen": st.column_config.TextColumn("Cuenta", disabled=True),
+        "ID": st.column_config.TextColumn("ID", disabled=True),
+    }
+
+    edited = st.data_editor(
+        table_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config,
+        key="trash_editor",
+    )
+
+    selected_ids = edited.loc[edited["Restaurar"] == True, "ID"].tolist() if "ID" in edited.columns else []
+
+    if st.button("♻️ Restaurar seleccionados", type="primary", disabled=len(selected_ids) == 0):
+        count = restore_transactions(selected_ids)
+        load_db_data.clear()
+        load_deleted_data.clear()
+        st.success(f"{count} movimiento(s) restaurado(s) con éxito.")
+        st.rerun()
+
+
 def render_dashboard_tab() -> None:
     _dashboard_css()
 
@@ -1082,13 +1157,16 @@ def render_dashboard_tab() -> None:
         return
 
     dashboard_df = normalize_dashboard_frame(df)
-    tabs = st.tabs(["Pesos (ARS)", "Dólares (USD)"])
+    tabs = st.tabs(["Pesos (ARS)", "Dólares (USD)", "🗑️ Papelera"])
 
     with tabs[0]:
         render_dashboard_currency_panel(dashboard_df[dashboard_df["Moneda"] == "ARS"].copy(), "ARS")
 
     with tabs[1]:
         render_dashboard_currency_panel(dashboard_df[dashboard_df["Moneda"] == "USD"].copy(), "USD")
+
+    with tabs[2]:
+        render_trash_tab()
 if "view" not in st.session_state:
     st.session_state["view"] = "dashboard"
 
