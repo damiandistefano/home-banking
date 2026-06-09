@@ -5,3 +5,5 @@ xlrd
 psycopg2-binary
 SQLAlchemy
 plotly
+fpdf2
+matplotlib
