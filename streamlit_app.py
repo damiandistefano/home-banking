@@ -15,6 +15,8 @@ from transaction_uploader import (
     read_excel_sheets,
     upload_dataframe,
     get_database_url,
+    soft_delete_transactions,
+    update_transaction,
 )
 
 st.set_page_config(page_title="Importador de transacciones", layout="wide")
@@ -34,6 +36,7 @@ def load_db_data() -> pd.DataFrame:
           origen as "Origen",
           categoria as "Categoria"
         from movimientos
+        where activo is distinct from false
         order by fecha desc, id desc
     """
 
@@ -690,35 +693,86 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
     if "Fecha_display" in table_df.columns:
         table_df["Fecha"] = table_df["Fecha_display"]
         table_df.drop(columns=["Fecha_display"], inplace=True, errors="ignore")
-    table_df = table_df.drop(columns=["ID", "Categoria", "Origen"], errors="ignore")
+
+    # Keep ID for tracking edits/deletes but don't expose Categoria/Origen duplicates
+    has_id = "ID" in table_df.columns
     if "Cuenta" not in table_df.columns and "Origen" in frame.columns:
         table_df["Cuenta"] = frame["Origen"]
+    table_df = table_df.drop(columns=["Categoria", "Origen", "Moneda"], errors="ignore")
 
-    visible_columns = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Cuenta"] if col in table_df.columns]
-    other_columns = [col for col in table_df.columns if col not in visible_columns]
-    table_df = table_df[visible_columns + other_columns]
+    # Add delete checkbox column at the front
+    table_df.insert(0, "Eliminar", False)
+
+    visible_columns = [col for col in ["Eliminar", "Fecha", "Descripción", "Monto", "Tipo", "Cuenta", "ID"] if col in table_df.columns]
+    table_df = table_df[visible_columns]
 
     symbol = _currency_meta(currency)[1]
     money_format = f"{symbol} %,.2f"
-    column_config: dict[str, object] = {}
+    column_config: dict[str, object] = {
+        "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marcá para eliminar (soft delete)"),
+    }
 
     if "Fecha" in table_df.columns:
-        column_config["Fecha"] = st.column_config.DateColumn("Fecha", format="DD/MM/YYYY")
+        column_config["Fecha"] = st.column_config.DateColumn("Fecha", format="DD/MM/YYYY", disabled=True)
     if "Monto" in table_df.columns:
-        column_config["Monto"] = st.column_config.NumberColumn("Monto", format=money_format)
+        column_config["Monto"] = st.column_config.NumberColumn("Monto", format=money_format, min_value=0.0)
     if "Tipo" in table_df.columns:
-        column_config["Tipo"] = st.column_config.TextColumn("Tipo")
+        column_config["Tipo"] = st.column_config.SelectboxColumn("Tipo", options=["Ingreso", "Egreso"])
     if "Cuenta" in table_df.columns:
-        column_config["Cuenta"] = st.column_config.TextColumn("Cuenta")
+        column_config["Cuenta"] = st.column_config.TextColumn("Cuenta", disabled=True)
     if "Descripción" in table_df.columns:
         column_config["Descripción"] = st.column_config.TextColumn("Descripción")
+    if "ID" in table_df.columns:
+        column_config["ID"] = st.column_config.TextColumn("ID", disabled=True)
 
-    st.dataframe(
-        table_df.style.map(style_tipo, subset=["Tipo"]) if "Tipo" in table_df.columns else table_df,
+    # Unique key per currency so ARS/USD panels don't share state
+    editor_key = f"detail_editor_{currency}"
+    edited = st.data_editor(
+        table_df,
         use_container_width=True,
         hide_index=True,
         column_config=column_config,
+        key=editor_key,
     )
+
+    if st.button("💾 Guardar Cambios", key=f"save_changes_{currency}", type="primary"):
+        ids_to_delete = edited.loc[edited["Eliminar"] == True, "ID"].tolist() if "ID" in edited.columns else []
+        deleted_count = 0
+        updated_count = 0
+
+        if ids_to_delete:
+            deleted_count = soft_delete_transactions(ids_to_delete)
+
+        # Detect edited rows (compare with original, exclude delete-marked rows)
+        if has_id and "ID" in edited.columns:
+            original = table_df.set_index("ID")
+            edited_indexed = edited[~edited["Eliminar"]].set_index("ID")
+            for row_id, row in edited_indexed.iterrows():
+                orig = original.loc[row_id] if row_id in original.index else None
+                if orig is None:
+                    continue
+                kwargs: dict = {}
+                if "Descripción" in row and row["Descripción"] != orig.get("Descripción"):
+                    kwargs["descripcion"] = str(row["Descripción"])
+                if "Monto" in row and row["Monto"] != orig.get("Monto"):
+                    kwargs["monto"] = float(row["Monto"])
+                if "Tipo" in row and row["Tipo"] != orig.get("Tipo"):
+                    kwargs["tipo"] = str(row["Tipo"])
+                if kwargs:
+                    if update_transaction(str(row_id), **kwargs):
+                        updated_count += 1
+
+        if deleted_count or updated_count:
+            load_db_data.clear()
+            msgs = []
+            if deleted_count:
+                msgs.append(f"{deleted_count} movimiento(s) eliminado(s)")
+            if updated_count:
+                msgs.append(f"{updated_count} movimiento(s) actualizado(s)")
+            st.success(", ".join(msgs) + ".")
+            st.rerun()
+        else:
+            st.info("No se detectaron cambios.")
 
 
 def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:

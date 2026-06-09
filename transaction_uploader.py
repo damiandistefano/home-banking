@@ -65,11 +65,66 @@ def ensure_table_exists() -> None:
                   monto numeric(14,2) not null,
                   tipo text not null,
                   origen text not null,
-                  categoria text default ''
+                  categoria text default '',
+                  activo boolean default true
                 )
                 """
             )
+            cur.execute(
+                f"""
+                alter table {TABLE_NAME} add column if not exists activo boolean default true
+                """
+            )
         conn.commit()
+
+
+def soft_delete_transactions(ids: list[str]) -> int:
+    if not ids:
+        return 0
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"update {TABLE_NAME} set activo = false where id = any(%s)",
+                (ids,),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+    return deleted
+
+
+def update_transaction(
+    id: str,
+    descripcion: str | None = None,
+    monto: float | None = None,
+    tipo: str | None = None,
+    categoria: str | None = None,
+) -> bool:
+    fields: list[str] = []
+    values: list = []
+    if descripcion is not None:
+        fields.append("descripcion = %s")
+        values.append(descripcion)
+    if monto is not None:
+        fields.append("monto = %s")
+        values.append(monto)
+    if tipo is not None:
+        fields.append("tipo = %s")
+        values.append(tipo)
+    if categoria is not None:
+        fields.append("categoria = %s")
+        values.append(categoria)
+    if not fields:
+        return False
+    values.append(id)
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"update {TABLE_NAME} set {', '.join(fields)} where id = %s",
+                values,
+            )
+            updated = cur.rowcount > 0
+        conn.commit()
+    return updated
 
 
 def file_signature(file_path: Path) -> str:
