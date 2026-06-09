@@ -561,8 +561,6 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
         st.date_input(
             "Rango de fechas",
             value=st.session_state[date_key],
-            min_value=min_day,
-            max_value=max_day,
             key=date_key,
             label_visibility="collapsed",
         )
@@ -723,14 +721,16 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
         table_df["Cuenta"] = frame["Origen"]
     table_df = table_df.drop(columns=["Categoria", "Origen", "Moneda"], errors="ignore")
 
-    # Add delete checkbox column at the front
-    table_df.insert(0, "Eliminar", False)
+    # Add delete checkbox column at the end
+    table_df["Eliminar"] = False
 
-    visible_columns = [col for col in ["Eliminar", "Fecha", "Descripción", "Monto", "Tipo", "Cuenta", "ID"] if col in table_df.columns]
+    visible_columns = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Cuenta", "ID", "Eliminar"] if col in table_df.columns]
     table_df = table_df[visible_columns]
 
     symbol = _currency_meta(currency)[1]
     money_format = f"{symbol} %,.2f"
+    # column_order excludes ID so it stays hidden but available for tracking
+    column_order = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Cuenta", "Eliminar"] if col in table_df.columns]
     column_config: dict[str, object] = {
         "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marcá para eliminar (soft delete)"),
     }
@@ -755,10 +755,19 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
         use_container_width=True,
         hide_index=True,
         column_config=column_config,
+        column_order=column_order,
         key=editor_key,
     )
 
-    if st.button("💾 Guardar Cambios", key=f"save_changes_{currency}", type="primary"):
+    # Show save button only when there are actual changes in the editor
+    editor_state = st.session_state.get(editor_key, {})
+    has_changes = bool(
+        editor_state.get("edited_rows")
+        or editor_state.get("added_rows")
+        or editor_state.get("deleted_rows")
+    )
+
+    if has_changes and st.button("💾 Guardar Cambios", key=f"save_changes_{currency}", type="primary"):
         ids_to_delete = edited.loc[edited["Eliminar"] == True, "ID"].tolist() if "ID" in edited.columns else []
         deleted_count = 0
         updated_count = 0
