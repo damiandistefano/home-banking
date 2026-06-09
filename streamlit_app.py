@@ -1015,6 +1015,7 @@ def render_dashboard_tab() -> None:
         st.markdown("<div style='height:0.45rem;'></div>", unsafe_allow_html=True)
         if st.button("Upload", use_container_width=True):
             st.session_state["view"] = "upload"
+            st.rerun()
 
     try:
         df = load_db_data()
