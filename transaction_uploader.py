@@ -78,6 +78,20 @@ def ensure_table_exists() -> None:
         conn.commit()
 
 
+def restore_transactions(ids: list[str]) -> int:
+    if not ids:
+        return 0
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"update {TABLE_NAME} set activo = true where id = any(%s)",
+                (ids,),
+            )
+            restored = cur.rowcount
+        conn.commit()
+    return restored
+
+
 def soft_delete_transactions(ids: list[str]) -> int:
     if not ids:
         return 0
