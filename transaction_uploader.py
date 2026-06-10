@@ -435,6 +435,18 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
         else:
             origin_series = pd.Series([detect_currency_origin(df_raw, bank_name or "") for _ in df.index], index=df.index)
 
+    # --- Limpieza de filas basura ---
+    # Eliminar filas donde la columna de fecha contiene literalmente el nombre del encabezado
+    _header_tokens = {"fecha", "date", "f. mov.", "f mov", "operacion", "operación"}
+    _garbage_header_mask = df[date_col].astype(str).str.strip().str.lower().isin(_header_tokens)
+    # Eliminar filas donde el monto es nulo o vacío
+    _garbage_amount_mask = df[amount_col].isna() | (df[amount_col].astype(str).str.strip() == "")
+    _garbage_mask = _garbage_header_mask | _garbage_amount_mask
+    if _garbage_mask.any():
+        df = df[~_garbage_mask].copy()
+        amount_series = amount_series[~_garbage_mask]
+        origin_series = origin_series[~_garbage_mask]
+
     out = pd.DataFrame()
     out["ID"] = ""
     out["Fecha"] = parse_excel_date(df[date_col])
@@ -444,7 +456,18 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
     out["Monto"] = signed_amounts.abs()
     out["Origen"] = origin_series
     out["Categoria"] = ""
-    out = out.dropna(subset=["Fecha"])
+
+    # --- Validación ultra robusta de fechas ---
+    _before_date_filter = len(out)
+    out = out[out["Fecha"].notna() & (out["Fecha"] != "NaT")]
+    _invalid_date_count = _before_date_filter - len(out)
+    if _invalid_date_count > 0:
+        _msg = f"Se omitieron {_invalid_date_count} fila(s) con fecha inválida o nula durante la lectura del archivo."
+        if debug:
+            print(f"ADVERTENCIA: {_msg}")
+        if st is not None:
+            st.warning(_msg)
+
     out = out[out["Descripción"].ne("") & out["Descripción"].ne("nan")]
     out["ID"] = out.apply(build_transaction_id, axis=1)
 
@@ -498,7 +521,14 @@ def append_to_database(rows: pd.DataFrame) -> dict[str, int]:
     payload["Fecha"] = pd.to_datetime(payload["Fecha"], errors="coerce").dt.date
     payload["ID"] = payload["ID"].astype(str).str.strip()
     original_count = len(payload)
-    payload = payload[payload["Fecha"].notna() & payload["ID"].ne("")].drop_duplicates(subset=["ID"], keep="first")
+    _valid_payload = payload[payload["Fecha"].notna() & payload["ID"].ne("")]
+    _db_invalid_count = original_count - len(_valid_payload)
+    if _db_invalid_count > 0:
+        _msg = f"Se omitieron {_db_invalid_count} fila(s) adicional(es) con fecha inválida antes de insertar en la base de datos."
+        print(f"ADVERTENCIA: {_msg}")
+        if st is not None:
+            st.warning(_msg)
+    payload = _valid_payload.drop_duplicates(subset=["ID"], keep="first")
     records = [
         (
             row["ID"],
