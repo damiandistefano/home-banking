@@ -409,7 +409,14 @@ def parse_mercadopago_sheet(df_raw: pd.DataFrame, debug: bool = False) -> pd.Dat
             st.warning(msg)
 
     out = out[out["Descripción"].ne("") & out["Descripción"].ne("nan")]
-    out["ID"] = out.apply(build_transaction_id, axis=1)
+
+    ref_col = "REFERENCE_ID"
+    if ref_col in df.columns:
+        out["ID"] = df.loc[out.index, ref_col].astype(str).str.strip().apply(
+            lambda r: hashlib.sha1(f"MP|{r}".encode("utf-8")).hexdigest()[:16]
+        )
+    else:
+        out["ID"] = out.apply(build_transaction_id, axis=1)
 
     if debug:
         print(f"Mercado Pago: {len(out)} transacciones parseadas.")
