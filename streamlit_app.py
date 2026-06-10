@@ -828,8 +828,8 @@ def _render_pdf_download_button(filtered: pd.DataFrame, currency: str) -> None:
         "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
     ]
-    btn_label = f"📄 Descargar PDF — {month_names[mes - 1]} {año} ({currency})"
-    file_name = f"resumen_{currency}_{mes:02d}_{año}.pdf"
+    btn_label = f"📄 PDF {month_names[mes - 1]} {año}"
+    file_name = f"informe_{currency}_{año}_{mes:02d}.pdf"
 
     try:
         pdf_bytes = generate_monthly_pdf(filtered, mes, año, currency)
@@ -852,23 +852,29 @@ def _render_pdf_download_button(filtered: pd.DataFrame, currency: str) -> None:
 
 def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     label, _ = _currency_meta(currency)
-    st.markdown(f"### {label}")
     filtered, _ = render_dashboard_filters(frame, currency)
 
     if filtered.empty:
+        st.markdown(f"### {label}")
         st.info("No hay movimientos para los filtros seleccionados.")
         return
 
-    st.markdown(
-        f"<div style='margin: 0.5rem 0 1rem 0; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
-        f"{len(filtered)} movimientos visibles</div>",
-        unsafe_allow_html=True,
-    )
+    # ── Title row: label | badge | PDF button ─────────────────────────────
+    title_col, badge_col, pdf_col = st.columns([4, 2, 1.5])
+    with title_col:
+        st.markdown(f"### {label}")
+    with badge_col:
+        st.markdown(
+            f"<div style='margin-top:0.6rem; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
+            f"{len(filtered)} movimientos visibles</div>",
+            unsafe_allow_html=True,
+        )
+    with pdf_col:
+        st.markdown("<div style='margin-top:0.4rem;'>", unsafe_allow_html=True)
+        _render_pdf_download_button(filtered, currency)
+        st.markdown("</div>", unsafe_allow_html=True)
 
     render_dashboard_kpis(filtered, currency)
-
-    # ── PDF download button ────────────────────────────────────────────────
-    _render_pdf_download_button(filtered, currency)
 
     chart_left, chart_right = st.columns(2)
     with chart_left:

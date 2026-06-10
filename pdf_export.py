@@ -165,19 +165,17 @@ def generate_monthly_pdf(
     moneda: str,
 ) -> Optional[bytes]:
     """
-    Generate a monthly financial summary PDF and return it as bytes.
+    Generate a PDF summary for the given DataFrame (already filtered by the caller).
 
-    Returns None if the filtered dataframe is empty.
+    `mes` and `año` are used only for the PDF header/title.
+    Returns None if the dataframe is empty.
     """
-    # ── filter to the requested month/year/currency ──────────────────────────
     work = df.copy()
 
-    # ensure Fecha_dt exists
     if "Fecha_dt" not in work.columns:
         work["Fecha_dt"] = pd.to_datetime(work.get("Fecha"), errors="coerce", dayfirst=True)
 
     work = work.dropna(subset=["Fecha_dt"])
-    work = work[(work["Fecha_dt"].dt.month == mes) & (work["Fecha_dt"].dt.year == año)]
 
     if "Moneda" in work.columns:
         work = work[work["Moneda"].str.upper() == moneda.upper()]
