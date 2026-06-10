@@ -355,7 +355,72 @@ def parse_excel_date(series: pd.Series) -> pd.Series:
     return parsed.dt.strftime("%Y-%m-%d")
 
 
+def detect_mercadopago_layout(df_raw: pd.DataFrame) -> int:
+    """Devuelve el índice de la fila de encabezado si el sheet es un extracto de Mercado Pago, sino -1."""
+    mp_headers = {"release_date", "transaction_type", "transaction_net_amount"}
+    for idx, row in df_raw.iterrows():
+        values = {str(cell).strip().lower() for cell in row.tolist() if not pd.isna(cell)}
+        if len(mp_headers & values) >= 2:
+            return int(idx)
+    return -1
+
+
+def parse_mercadopago_sheet(df_raw: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
+    header_row = detect_mercadopago_layout(df_raw)
+    if header_row == -1:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    df = df_raw.iloc[header_row + 1:].copy()
+    df.columns = [str(c).strip().upper() for c in df_raw.iloc[header_row].tolist()]
+
+    date_col, desc_col, amount_col = "RELEASE_DATE", "TRANSACTION_TYPE", "TRANSACTION_NET_AMOUNT"
+
+    if not all(c in df.columns for c in [date_col, desc_col, amount_col]):
+        if debug:
+            print(f"Mercado Pago: columnas esperadas no encontradas. Cols: {list(df.columns)}")
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    _garbage_mask = (
+        df[date_col].isna()
+        | (df[date_col].astype(str).str.strip() == "")
+        | df[amount_col].isna()
+    )
+    df = df[~_garbage_mask].copy()
+
+    amount_series = df[amount_col].apply(clean_amount)
+
+    out = pd.DataFrame()
+    out["ID"] = ""
+    out["Fecha"] = parse_excel_date(df[date_col])
+    out["Descripción"] = df[desc_col].astype(str).str.strip()
+    out["Tipo"] = amount_series.apply(lambda a: "Ingreso" if a >= 0 else "Egreso")
+    out["Monto"] = amount_series.abs()
+    out["Origen"] = "Mercado Pago"
+    out["Categoria"] = ""
+
+    before = len(out)
+    out = out[out["Fecha"].notna() & (out["Fecha"] != "NaT")]
+    discarded = before - len(out)
+    if discarded > 0:
+        msg = f"Se omitieron {discarded} fila(s) con fecha inválida o nula (Mercado Pago)."
+        if debug:
+            print(f"ADVERTENCIA: {msg}")
+        if st is not None:
+            st.warning(msg)
+
+    out = out[out["Descripción"].ne("") & out["Descripción"].ne("nan")]
+    out["ID"] = out.apply(build_transaction_id, axis=1)
+
+    if debug:
+        print(f"Mercado Pago: {len(out)} transacciones parseadas.")
+
+    return out[OUTPUT_COLUMNS]
+
+
 def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = False) -> pd.DataFrame:
+    if detect_mercadopago_layout(df_raw) != -1:
+        return parse_mercadopago_sheet(df_raw, debug=debug)
+
     header_row = detect_header_row(df_raw, debug=debug)
     if header_row == -1:
         if debug:
