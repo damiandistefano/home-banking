@@ -44,8 +44,19 @@ def _week_of_month(dt: pd.Timestamp) -> int:
     return (dt.day - 1) // 7 + 1
 
 
+def _fmt_axis_amount(x: float, _) -> str:
+    """Human-readable axis tick: avoids scientific notation."""
+    if x >= 1_000_000:
+        return f"{x / 1_000_000:,.1f}M".replace(",", ".")
+    if x >= 1_000:
+        return f"{x / 1_000:,.0f}K".replace(",", ".")
+    return f"{x:,.0f}".replace(",", ".")
+
+
 def _build_weekly_chart(frame: pd.DataFrame, mes: int, año: int, moneda: str) -> bytes:
     """Weekly bar chart of expenses for the given month."""
+    import matplotlib.ticker as mticker
+
     symbol = "$" if moneda == "ARS" else "U$S"
     month_days = calendar.monthrange(año, mes)[1]
     week_labels: list[str] = []
@@ -82,7 +93,7 @@ def _build_weekly_chart(frame: pd.DataFrame, mes: int, año: int, moneda: str) -
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + max_val * 0.02,
-                f"{symbol} {val:,.0f}".replace(",", "."),
+                f"{symbol} {_fmt_axis_amount(val, None)}",
                 ha="center", va="bottom", fontsize=6.5,
                 color=tuple(c / 255 for c in _TEXT_DIM),
             )
@@ -94,6 +105,7 @@ def _build_weekly_chart(frame: pd.DataFrame, mes: int, año: int, moneda: str) -
         fontsize=9, color=tuple(c / 255 for c in _TEXT_MAIN), pad=8,
     )
     ax.tick_params(colors=tuple(c / 255 for c in _TEXT_DIM), labelsize=6.5)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_axis_amount))
     for spine in ax.spines.values():
         spine.set_edgecolor(tuple(c / 255 for c in _BORDER))
     ax.yaxis.grid(True, color=tuple(c / 255 for c in _BORDER), linewidth=0.5, zorder=0)
@@ -132,7 +144,7 @@ def _build_account_chart(frame: pd.DataFrame, moneda: str) -> bytes:
     else:
         grouped = pd.DataFrame(columns=["label", "monto"])
 
-    fig, ax = plt.subplots(figsize=(4.5, 3.0))
+    fig, ax = plt.subplots(figsize=(5.5, 3.4))
     fig.patch.set_facecolor(tuple(c / 255 for c in _BG))
     ax.set_facecolor(tuple(c / 255 for c in _BG))
 
@@ -156,8 +168,6 @@ def _build_account_chart(frame: pd.DataFrame, moneda: str) -> bytes:
             pctdistance=0.75,
         )
 
-        # Percentage labels inside the donut wedges
-        cumulative = 0.0
         import numpy as np
         for wedge, val in zip(wedges, values):
             pct = val / total * 100
@@ -167,18 +177,18 @@ def _build_account_chart(frame: pd.DataFrame, moneda: str) -> bytes:
                 x = r * np.cos(np.radians(angle))
                 y = r * np.sin(np.radians(angle))
                 ax.text(x, y, f"{pct:.1f}%", ha="center", va="center",
-                        fontsize=6.5, color="white", fontweight="bold")
+                        fontsize=7, color="white", fontweight="bold")
 
-        # Legend outside
+        # Legend outside — full label (up to 28 chars) + rounded amount
         legend_labels = [
-            f"{lbl[:20]}  {symbol} {val:,.0f}".replace(",", ".")
+            f"{lbl[:28]}  {symbol} {_fmt_axis_amount(val, None)}"
             for lbl, val in zip(labels, values)
         ]
         ax.legend(
             wedges, legend_labels,
             loc="center left",
             bbox_to_anchor=(1.02, 0.5),
-            fontsize=6,
+            fontsize=7.5,
             frameon=False,
             labelcolor=tuple(c / 255 for c in _TEXT_DIM),
         )
@@ -326,8 +336,9 @@ def generate_monthly_pdf(
     y_cursor += chart_h + 8
 
     # ── Transactions table ─────────────────────────────────────────────────────
-    col_widths = [28, 88, 34, 32]
-    headers    = ["Fecha", "Descripción", "Monto", "Tipo"]
+    # Fecha | Descripción | Cuenta | Monto | Tipo  — total 182 mm usable
+    col_widths = [25, 57, 42, 32, 26]
+    headers    = ["Fecha", "Descripción", "Cuenta", "Monto", "Tipo"]
 
     pdf.set_xy(14, y_cursor)
     pdf.set_font("Helvetica", "B", 9)
@@ -351,7 +362,9 @@ def generate_monthly_pdf(
             pdf.set_font("Helvetica", "", 7.5)
 
         fecha_str  = row["Fecha_dt"].strftime("%d/%m/%Y")
-        desc       = str(row.get("Descripción") or row.get("Descripcion") or "")[:52]
+        desc       = str(row.get("Descripción") or row.get("Descripcion") or "")[:34]
+        account_col = next((c for c in ["Cuenta", "Origen", "Banco"] if c in row.index), None)
+        cuenta_str = str(row[account_col] if account_col else "").strip()[:26]
         monto_val  = abs(float(pd.to_numeric(row.get("Monto"), errors="coerce") or 0))
         monto_str  = _fmt(monto_val, symbol)
         tipo_val   = str(row.get("Tipo") or "").capitalize()
@@ -375,13 +388,18 @@ def generate_monthly_pdf(
         x_row += col_widths[1]
 
         pdf.set_xy(x_row, pdf.get_y())
-        pdf.set_text_color(*_TEXT_MAIN)
-        pdf.cell(col_widths[2], row_h, monto_str, border=1, fill=True, align="R")
+        pdf.set_text_color(*_TEXT_DIM)
+        pdf.cell(col_widths[2], row_h, cuenta_str, border=1, fill=True)
         x_row += col_widths[2]
 
         pdf.set_xy(x_row, pdf.get_y())
+        pdf.set_text_color(*_TEXT_MAIN)
+        pdf.cell(col_widths[3], row_h, monto_str, border=1, fill=True, align="R")
+        x_row += col_widths[3]
+
+        pdf.set_xy(x_row, pdf.get_y())
         pdf.set_text_color(*tipo_color)
-        pdf.cell(col_widths[3], row_h, tipo_val, border=1, fill=True, align="C")
+        pdf.cell(col_widths[4], row_h, tipo_val, border=1, fill=True, align="C")
         pdf.ln()
 
     return bytes(pdf.output())

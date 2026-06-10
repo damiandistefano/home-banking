@@ -267,9 +267,9 @@ def detect_macro_origin(df_raw: pd.DataFrame, bank_name: str = "") -> str:
     for _, row in df_raw.head(10).iterrows():
         text = " ".join("" if pd.isna(cell) else str(cell) for cell in row.tolist()).lower()
         if "caja de ahorros en pesos" in text or "caja de ahorro en pesos" in text:
-            return "Macro - Caja Ahorro Pesos"
+            return "Macro - Ahorro ARS"
         if "cuenta corriente" in text:
-            return "Macro - Cuenta Corriente"
+            return "Macro - Corriente"
     return bank_name or "Macro"
 
 
@@ -278,9 +278,9 @@ def detect_galicia_origin(df_raw: pd.DataFrame, bank_name: str = "") -> str:
         text = " ".join("" if pd.isna(cell) else str(cell) for cell in row.tolist()).lower()
         if "banco galicia" in text:
             if "caja ahorro pesos" in text or "caja de ahorro pesos" in text:
-                return "Galicia - Caja Ahorro Pesos"
+                return "Galicia - Ahorro ARS"
             if "cuenta corriente" in text:
-                return "Galicia - Cuenta Corriente"
+                return "Galicia - Corriente"
             return "Galicia"
     return bank_name or "Galicia"
 
@@ -401,8 +401,8 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
         amount_series = pd.Series([row_amount(idx) for idx in df.index], index=df.index)
         origin_series = pd.Series(
             [
-                "Santander - Caja de Ahorro Pesos" if (santander_savings_col and float(savings_series.loc[idx]) != 0)
-                else "Santander - Cuenta Corriente" if (santander_current_col and float(current_series.loc[idx]) != 0)
+                "Santander - Ahorro ARS" if (santander_savings_col and float(savings_series.loc[idx]) != 0)
+                else "Santander - Corriente" if (santander_current_col and float(current_series.loc[idx]) != 0)
                 else "Santander"
                 for idx in df.index
             ],
