@@ -892,19 +892,18 @@ def render_upload_tab() -> None:
     if "uploader_key_version" not in st.session_state:
         st.session_state["uploader_key_version"] = 0
 
-    left_col, right_col = st.columns([4, 1])
-    with left_col:
-        st.write("Subí un archivo Excel para actualizar la base general.")
+    upload_tab, manual_tab = st.tabs(["📂 Subir Archivo Bancario", "💵 Carga Manual"])
 
-    with right_col:
+    with upload_tab:
+        st.write("Subí un archivo Excel para actualizar la base general.")
         uploaded_file = st.file_uploader(
-            "Upload",
+            "Seleccioná uno o más archivos (.xls / .xlsx)",
             type=["xls", "xlsx"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state['uploader_key_version']}",
         )
 
-    with st.expander("💵 Carga Manual de Efectivo / Caja", expanded=False):
+    with manual_tab:
         with st.form(key="manual_cash_form", clear_on_submit=True):
             col_fecha, col_desc = st.columns([1, 2])
             with col_fecha:
@@ -1165,6 +1164,7 @@ def render_trash_tab() -> None:
         table_df["Fecha"] = dashboard_df["Fecha_display"]
     table_df = table_df[[c for c in visible_cols if c in table_df.columns]]
 
+    display_cols = [c for c in table_df.columns if c != "ID"]
     column_config = {
         "Restaurar": st.column_config.CheckboxColumn("Restaurar", help="Marcá para recuperar este movimiento"),
         "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY", disabled=True),
@@ -1172,18 +1172,17 @@ def render_trash_tab() -> None:
         "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
         "Descripción": st.column_config.TextColumn("Descripción", disabled=True),
         "Origen": st.column_config.TextColumn("Cuenta", disabled=True),
-        "ID": st.column_config.TextColumn("ID", disabled=True),
     }
 
     edited = st.data_editor(
-        table_df,
+        table_df[display_cols],
         use_container_width=True,
         hide_index=True,
         column_config=column_config,
         key="trash_editor",
     )
 
-    selected_ids = edited.loc[edited["Restaurar"] == True, "ID"].tolist() if "ID" in edited.columns else []
+    selected_ids = table_df.loc[edited["Restaurar"] == True, "ID"].tolist() if "ID" in table_df.columns else []
 
     if st.button("♻️ Restaurar seleccionados", type="primary", disabled=len(selected_ids) == 0):
         count = restore_transactions(selected_ids)
