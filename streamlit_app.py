@@ -904,91 +904,107 @@ def render_upload_tab() -> None:
         )
 
     with manual_tab:
-        with st.form(key="manual_cash_form", clear_on_submit=True):
-            col_fecha, col_desc = st.columns([1, 2])
-            with col_fecha:
-                manual_fecha = st.date_input("Fecha", value=date.today())
-            with col_desc:
-                manual_descripcion = st.text_input("Descripción")
+        # Show form only when there's no pending preview
+        if "manual_preview" not in st.session_state:
+            with st.form(key="manual_cash_form", clear_on_submit=True):
+                col_fecha, col_desc = st.columns([1, 2])
+                with col_fecha:
+                    manual_fecha = st.date_input("Fecha", value=date.today())
+                with col_desc:
+                    manual_descripcion = st.text_input("Descripción")
 
-            col_cuenta, col_moneda = st.columns(2)
-            with col_cuenta:
-                manual_cuenta = st.text_input("Cuenta", value="Caja Efectivo")
-            with col_moneda:
-                manual_moneda = st.selectbox("Moneda", ["ARS", "USD"])
+                col_cuenta, col_moneda = st.columns(2)
+                with col_cuenta:
+                    manual_cuenta = st.text_input("Cuenta", value="Caja Efectivo")
+                with col_moneda:
+                    manual_moneda = st.selectbox("Moneda", ["ARS", "USD"])
 
-            col_tipo, col_monto = st.columns([1, 1])
-            with col_tipo:
-                manual_tipo = st.radio(
-                    "Tipo de Movimiento",
-                    ["Ingreso", "Egreso"],
-                    horizontal=True,
-                )
-            with col_monto:
-                manual_monto = st.number_input("Monto", min_value=0.0, step=1000.0)
+                col_tipo, col_monto = st.columns([1, 1])
+                with col_tipo:
+                    manual_tipo = st.radio(
+                        "Tipo de Movimiento",
+                        ["Ingreso", "Egreso"],
+                        horizontal=True,
+                    )
+                with col_monto:
+                    manual_monto = st.number_input(
+                        "Monto",
+                        min_value=0.0,
+                        step=1000.0,
+                        value=None,
+                        placeholder="0.00",
+                    )
 
-            submitted_manual = st.form_submit_button("Registrar Movimiento", type="primary")
+                submitted_manual = st.form_submit_button("Revisar y Registrar", type="primary")
 
-        if submitted_manual:
-            if not manual_descripcion.strip():
-                st.error("La descripción es obligatoria.")
-            elif not manual_cuenta.strip():
-                st.error("La cuenta es obligatoria.")
-            elif manual_monto <= 0:
-                st.error("El monto debe ser mayor a cero.")
-            else:
-                movimiento_id = str(uuid.uuid4())
-                signed_amount = float(manual_monto) * (-1 if manual_tipo == "Egreso" else 1)
-
-                manual_df = pd.DataFrame(
-                    [
-                        {
-                            "ID": movimiento_id,
-                            "Fecha": manual_fecha,
-                            "Descripción": manual_descripcion.strip(),
-                            "Cuenta": manual_cuenta.strip(),
-                            "Monto": signed_amount,
-                            "Moneda": manual_moneda,
-                        }
-                    ]
-                )
-
-                try:
-                    from transaction_uploader import TABLE_NAME, get_db_connection
-
-                    with st.spinner("Registrando movimiento..."):
-                        record = {
-                            "id": str(movimiento_id),
-                            "fecha": manual_fecha,
-                            "descripcion": str(manual_descripcion.strip()),
-                            "monto": float(signed_amount),
-                            "tipo": str(manual_tipo),
-                            "origen": str(manual_cuenta.strip()),
-                            "categoria": "",
-                        }
-
-                        with get_db_connection() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute(
-                                    f"insert into {TABLE_NAME} (id, fecha, descripcion, monto, tipo, origen, categoria) values (%s, %s, %s, %s, %s, %s, %s)",
-                                    (
-                                        record["id"],
-                                        record["fecha"],
-                                        record["descripcion"],
-                                        record["monto"],
-                                        record["tipo"],
-                                        record["origen"],
-                                        record["categoria"],
-                                    ),
-                                )
-                            conn.commit()
-
-                    load_db_data.clear()
-                    st.success("Movimiento registrado correctamente.")
-                    time.sleep(1)
+            if submitted_manual:
+                if not manual_descripcion.strip():
+                    st.error("La descripción es obligatoria.")
+                elif not manual_cuenta.strip():
+                    st.error("La cuenta es obligatoria.")
+                elif manual_monto is None or manual_monto <= 0:
+                    st.error("El monto debe ser mayor a cero.")
+                else:
+                    signed_amount = float(manual_monto) * (-1 if manual_tipo == "Egreso" else 1)
+                    st.session_state["manual_preview"] = {
+                        "id": str(uuid.uuid4()),
+                        "fecha": manual_fecha,
+                        "descripcion": manual_descripcion.strip(),
+                        "cuenta": manual_cuenta.strip(),
+                        "monto": signed_amount,
+                        "moneda": manual_moneda,
+                        "tipo": manual_tipo,
+                    }
                     st.rerun()
-                except Exception as exc:
-                    st.error(f"Error al registrar el movimiento: {exc}")
+
+        else:
+            # Preview step
+            p = st.session_state["manual_preview"]
+            st.markdown("#### Revisá el movimiento antes de confirmar")
+            monto_fmt = f"{'🟢 +' if p['monto'] >= 0 else '🔴 -'}${abs(p['monto']):,.2f} {p['moneda']}"
+            preview_df = pd.DataFrame([{
+                "Fecha": p["fecha"].strftime("%d/%m/%Y"),
+                "Descripción": p["descripcion"],
+                "Cuenta": p["cuenta"],
+                "Tipo": p["tipo"],
+                "Monto": monto_fmt,
+            }])
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+            col_confirm, col_cancel = st.columns([1, 1])
+            with col_confirm:
+                if st.button("✅ Confirmar y guardar", type="primary", use_container_width=True):
+                    try:
+                        from transaction_uploader import TABLE_NAME, get_db_connection
+
+                        with st.spinner("Registrando movimiento..."):
+                            with get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute(
+                                        f"insert into {TABLE_NAME} (id, fecha, descripcion, monto, tipo, origen, categoria) values (%s, %s, %s, %s, %s, %s, %s)",
+                                        (
+                                            p["id"],
+                                            p["fecha"],
+                                            p["descripcion"],
+                                            p["monto"],
+                                            p["tipo"],
+                                            p["cuenta"],
+                                            "",
+                                        ),
+                                    )
+                                conn.commit()
+
+                        del st.session_state["manual_preview"]
+                        load_db_data.clear()
+                        st.success("Movimiento registrado correctamente.")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Error al registrar el movimiento: {exc}")
+            with col_cancel:
+                if st.button("✏️ Corregir", use_container_width=True):
+                    del st.session_state["manual_preview"]
+                    st.rerun()
 
     if not uploaded_file:
         if st.session_state.get("subida_exitosa"):
