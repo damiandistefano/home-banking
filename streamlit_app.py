@@ -15,9 +15,11 @@ from transaction_uploader import (
     read_excel_sheets,
     upload_dataframe,
     get_database_url,
+    get_db_connection,
     soft_delete_transactions,
     restore_transactions,
     update_transaction,
+    purge_old_deleted_transactions,
 )
 from pdf_export import generate_monthly_pdf
 
@@ -66,6 +68,67 @@ def load_deleted_data() -> pd.DataFrame:
 
     with psycopg2.connect(get_database_url()) as conn:
         return pd.read_sql_query(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def load_available_months() -> list[tuple[int, int]]:
+    """Return (year, month) tuples for months present in the DB, newest first."""
+    import psycopg2
+
+    query = """
+        select distinct
+          extract(year from fecha)::int  as year,
+          extract(month from fecha)::int as month
+        from movimientos
+        where activo is distinct from false
+        order by year desc, month desc
+    """
+    with psycopg2.connect(get_database_url()) as conn:
+        rows = pd.read_sql_query(query, conn)
+    return [(int(r["year"]), int(r["month"])) for _, r in rows.iterrows()]
+
+
+@st.cache_data(ttl=300)
+def load_db_data_for_month(year: int, month: int) -> pd.DataFrame:
+    """Load all active transactions for a specific year/month."""
+    import psycopg2
+    from calendar import monthrange
+
+    last_day = monthrange(year, month)[1]
+    query = """
+        select
+          id as "ID",
+          fecha as "Fecha",
+          descripcion as "Descripción",
+          monto as "Monto",
+          tipo as "Tipo",
+          origen as "Origen",
+          categoria as "Categoria"
+        from movimientos
+        where activo is distinct from false
+          and fecha >= %(start)s
+          and fecha <= %(end)s
+        order by fecha desc, id desc
+    """
+    params = {
+        "start": date(year, month, 1),
+        "end": date(year, month, last_day),
+    }
+    with psycopg2.connect(get_database_url()) as conn:
+        return pd.read_sql_query(query, conn, params=params)
+
+
+def run_startup_tasks() -> None:
+    """Run once per session: ensure schema and purge old deleted records."""
+    if st.session_state.get("_startup_done"):
+        return
+    try:
+        purged = purge_old_deleted_transactions(days=30)
+        if purged:
+            load_deleted_data.clear()
+    except Exception:
+        pass
+    st.session_state["_startup_done"] = True
 
 
 def format_date_column(series: pd.Series) -> pd.Series:
@@ -533,50 +596,83 @@ def render_dashboard_kpis(frame: pd.DataFrame, currency: str) -> None:
         )
 
 
+_PERIOD_OPTIONS = ["Mes Actual", "Mes Anterior", "Últimos 3 Meses", "Año Actual", "Rango Personalizado"]
+
+
+def _resolve_period_dates(period: str, today: date) -> tuple[date, date]:
+    from calendar import monthrange
+
+    if period == "Mes Actual":
+        start = today.replace(day=1)
+        end = today.replace(day=monthrange(today.year, today.month)[1])
+    elif period == "Mes Anterior":
+        first_of_current = today.replace(day=1)
+        last_of_prev = first_of_current - pd.Timedelta(days=1)
+        start = last_of_prev.replace(day=1)
+        end = last_of_prev
+    elif period == "Últimos 3 Meses":
+        end = today.replace(day=monthrange(today.year, today.month)[1])
+        # go back 3 months
+        month = today.month - 2
+        year = today.year
+        if month <= 0:
+            month += 12
+            year -= 1
+        start = date(year, month, 1)
+    elif period == "Año Actual":
+        start = date(today.year, 1, 1)
+        end = date(today.year, 12, 31)
+    else:
+        # Rango Personalizado — caller handles it
+        start = today.replace(day=1)
+        end = today
+    return start, end
+
+
 def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.DataFrame, str]:
-    min_date = frame["Fecha_dt"].min()
-    max_date = frame["Fecha_dt"].max()
-    if pd.isna(min_date) or pd.isna(max_date):
+    if frame.empty or frame["Fecha_dt"].isna().all():
         return frame.iloc[0:0], ""
 
-    min_day = min_date.date()
-    max_day = max_date.date()
+    today = date.today()
     currency_key = currency.lower()
-    date_key = f"dashboard_date_{currency_key}"
+    period_key = f"dashboard_period_{currency_key}"
+    custom_range_key = f"dashboard_custom_range_{currency_key}"
     origin_key = f"dashboard_origin_{currency_key}"
     search_key = f"dashboard_search_{currency_key}"
 
-    if date_key not in st.session_state:
-        st.session_state[date_key] = (min_day, max_day)
-    else:
-        # Expand the saved range if new data extends beyond its boundaries.
-        saved = st.session_state[date_key]
-        saved_start = saved[0] if isinstance(saved, (tuple, list)) and len(saved) >= 1 else min_day
-        saved_end = saved[1] if isinstance(saved, (tuple, list)) and len(saved) >= 2 else max_day
-        new_start = min(saved_start, min_day)
-        new_end = max(saved_end, max_day)
-        if new_start != saved_start or new_end != saved_end:
-            st.session_state[date_key] = (new_start, new_end)
+    if period_key not in st.session_state:
+        st.session_state[period_key] = "Mes Actual"
+    if custom_range_key not in st.session_state:
+        min_day = frame["Fecha_dt"].min().date()
+        max_day = frame["Fecha_dt"].max().date()
+        st.session_state[custom_range_key] = (min_day, max_day)
     if origin_key not in st.session_state:
         st.session_state[origin_key] = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
     if search_key not in st.session_state:
         st.session_state[search_key] = ""
 
     st.markdown("<div class='dash-shell'>", unsafe_allow_html=True)
-    filter_cols = st.columns([1.0, 1.5, 1.25, 1.25])
+    filter_cols = st.columns([1.0, 1.6, 1.25, 1.25])
 
     with filter_cols[0]:
         st.markdown("<div class='dash-filter-label'>Moneda</div>", unsafe_allow_html=True)
         st.caption(_currency_meta(currency)[0])
 
     with filter_cols[1]:
-        st.markdown("<div class='dash-filter-label'>Rango de fechas</div>", unsafe_allow_html=True)
-        st.date_input(
-            "Rango de fechas",
-            value=st.session_state[date_key],
-            key=date_key,
+        st.markdown("<div class='dash-filter-label'>Período</div>", unsafe_allow_html=True)
+        st.selectbox(
+            "Período",
+            options=_PERIOD_OPTIONS,
+            key=period_key,
             label_visibility="collapsed",
         )
+        if st.session_state[period_key] == "Rango Personalizado":
+            st.date_input(
+                "Rango personalizado",
+                value=st.session_state[custom_range_key],
+                key=custom_range_key,
+                label_visibility="collapsed",
+            )
 
     origin_options = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
     with filter_cols[2]:
@@ -598,22 +694,27 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
             label_visibility="collapsed",
         )
 
-    selected_range = st.session_state[date_key]
+    selected_period = st.session_state[period_key]
     selected_origins = st.session_state[origin_key]
     search_text = str(st.session_state[search_key]).strip().lower()
 
-    filtered = frame.copy()
-    if isinstance(selected_range, (list, tuple)):
-        if len(selected_range) == 2:
-            start_date, end_date = selected_range
-            filtered = filtered[(filtered["Fecha_dt"].dt.date >= start_date) & (filtered["Fecha_dt"].dt.date <= end_date)]
-        elif len(selected_range) == 1:
-            start_date = selected_range[0]
-            if hasattr(start_date, "year"):
-                filtered = filtered[filtered["Fecha_dt"].dt.date >= start_date]
+    if selected_period == "Rango Personalizado":
+        raw_range = st.session_state[custom_range_key]
+        if isinstance(raw_range, (list, tuple)) and len(raw_range) == 2:
+            start_date, end_date = raw_range[0], raw_range[1]
+        elif isinstance(raw_range, (list, tuple)) and len(raw_range) == 1:
+            start_date = end_date = raw_range[0]
+        else:
+            start_date = end_date = raw_range if hasattr(raw_range, "year") else today
     else:
-        if hasattr(selected_range, "year"):
-            filtered = filtered[filtered["Fecha_dt"].dt.date >= selected_range]
+        start_date, end_date = _resolve_period_dates(selected_period, today)
+
+    filtered = frame.copy()
+    filtered = filtered[
+        (filtered["Fecha_dt"].dt.date >= start_date)
+        & (filtered["Fecha_dt"].dt.date <= end_date)
+    ]
+
     if selected_origins:
         filtered = filtered[filtered["Cuenta"].isin(selected_origins)]
     else:
@@ -821,81 +922,101 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
             st.info("No se detectaron cambios.")
 
 
-def _render_pdf_download_button(filtered: pd.DataFrame, currency: str) -> None:
-    """Render a PDF download button for the currently visible filtered data."""
-    today = date.today()
-
-    # Determine the most representative month/year from filtered data
-    if not filtered.empty and "Fecha_dt" in filtered.columns:
-        valid_dates = filtered["Fecha_dt"].dropna()
-        if not valid_dates.empty:
-            ref_date = valid_dates.max()
-            mes, año = ref_date.month, ref_date.year
-        else:
-            mes, año = today.month, today.year
-    else:
-        mes, año = today.month, today.year
-
+def _render_pdf_section(currency: str) -> None:
+    """Independent PDF generator: lets user pick a month regardless of dashboard filters."""
     month_names = [
         "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
     ]
-    btn_label = f"📄 PDF {month_names[mes - 1]} {año}"
-    file_name = f"informe_{currency}_{año}_{mes:02d}.pdf"
 
     try:
-        pdf_bytes = generate_monthly_pdf(filtered, mes, año, currency)
-    except Exception as exc:
-        st.warning(f"No se pudo generar el PDF: {exc}")
+        available_months = load_available_months()
+    except Exception:
+        available_months = []
+
+    if not available_months:
+        st.caption("Sin datos para generar PDF.")
         return
 
-    if pdf_bytes is None:
-        st.info("No hay movimientos para el período seleccionado. El PDF no fue generado.")
-        return
+    month_labels = [f"{month_names[m - 1]} {y}" for y, m in available_months]
+    pdf_month_key = f"pdf_month_select_{currency.lower()}"
 
-    st.download_button(
-        label=btn_label,
-        data=pdf_bytes,
-        file_name=file_name,
-        mime="application/pdf",
-        key=f"pdf_download_{currency}",
+    if pdf_month_key not in st.session_state:
+        st.session_state[pdf_month_key] = month_labels[0]
+
+    selected_label = st.selectbox(
+        "Seleccionar mes para PDF",
+        options=month_labels,
+        key=pdf_month_key,
+        label_visibility="visible",
     )
+
+    selected_idx = month_labels.index(selected_label)
+    sel_year, sel_month = available_months[selected_idx]
+    file_name = f"informe_{currency}_{sel_year}_{sel_month:02d}.pdf"
+
+    if st.button(f"📄 Generar PDF — {selected_label}", key=f"pdf_gen_btn_{currency.lower()}"):
+        try:
+            month_df_raw = load_db_data_for_month(sel_year, sel_month)
+            if month_df_raw.empty:
+                st.info("No hay movimientos para ese mes.")
+                return
+            month_df = normalize_dashboard_frame(month_df_raw)
+            month_df = month_df[month_df["Moneda"] == currency]
+            if month_df.empty:
+                st.info(f"No hay movimientos en {currency} para ese mes.")
+                return
+            pdf_bytes = generate_monthly_pdf(month_df, sel_month, sel_year, currency)
+        except Exception as exc:
+            st.warning(f"No se pudo generar el PDF: {exc}")
+            return
+
+        if pdf_bytes is None:
+            st.info("No hay movimientos para el período seleccionado.")
+            return
+
+        st.download_button(
+            label=f"⬇️ Descargar {file_name}",
+            data=pdf_bytes,
+            file_name=file_name,
+            mime="application/pdf",
+            key=f"pdf_download_{currency.lower()}_{sel_year}_{sel_month:02d}",
+        )
 
 
 def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     label, _ = _currency_meta(currency)
     filtered, _ = render_dashboard_filters(frame, currency)
 
-    if filtered.empty:
-        st.markdown(f"### {label}")
-        st.info("No hay movimientos para los filtros seleccionados.")
-        return
-
-    # ── Title row: label | badge | PDF button ─────────────────────────────
-    title_col, badge_col, pdf_col = st.columns([4, 2, 1.5])
+    # ── Title row ──────────────────────────────────────────────────────────
+    title_col, badge_col = st.columns([5, 2])
     with title_col:
         st.markdown(f"### {label}")
     with badge_col:
-        st.markdown(
-            f"<div style='margin-top:0.6rem; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
-            f"{len(filtered)} movimientos visibles</div>",
-            unsafe_allow_html=True,
-        )
-    with pdf_col:
-        st.markdown("<div style='margin-top:0.4rem;'>", unsafe_allow_html=True)
-        _render_pdf_download_button(filtered, currency)
-        st.markdown("</div>", unsafe_allow_html=True)
+        if not filtered.empty:
+            st.markdown(
+                f"<div style='margin-top:0.6rem; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
+                f"{len(filtered)} movimientos visibles</div>",
+                unsafe_allow_html=True,
+            )
 
-    render_dashboard_kpis(filtered, currency)
+    if filtered.empty:
+        st.info("No hay movimientos para los filtros seleccionados.")
+    else:
+        render_dashboard_kpis(filtered, currency)
 
-    chart_left, chart_right = st.columns(2)
-    with chart_left:
-        st.plotly_chart(build_cashflow_figure(filtered, currency), use_container_width=True)
-    with chart_right:
-        st.plotly_chart(build_distribution_figure(filtered, currency), use_container_width=True)
+        chart_left, chart_right = st.columns(2)
+        with chart_left:
+            st.plotly_chart(build_cashflow_figure(filtered, currency), use_container_width=True)
+        with chart_right:
+            st.plotly_chart(build_distribution_figure(filtered, currency), use_container_width=True)
 
-    st.markdown("### Detalle de transacciones")
-    render_dashboard_detail_table(filtered, currency)
+        st.markdown("### Detalle de transacciones")
+        render_dashboard_detail_table(filtered, currency)
+
+    st.markdown("---")
+    st.markdown("#### 📄 Reporte PDF")
+    _render_pdf_section(currency)
 
 
 def render_upload_tab() -> None:
@@ -1256,6 +1377,8 @@ def render_dashboard_tab() -> None:
         render_trash_tab()
 if "view" not in st.session_state:
     st.session_state["view"] = "dashboard"
+
+run_startup_tasks()
 
 st.markdown(
     "<div style='height:0.15rem;'></div>",
