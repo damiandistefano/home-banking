@@ -66,16 +66,35 @@ def ensure_table_exists() -> None:
                   tipo text not null,
                   origen text not null,
                   categoria text default '',
-                  activo boolean default true
+                  activo boolean default true,
+                  fecha_borrado timestamptz default null
                 )
                 """
             )
             cur.execute(
-                f"""
-                alter table {TABLE_NAME} add column if not exists activo boolean default true
-                """
+                f"alter table {TABLE_NAME} add column if not exists activo boolean default true"
+            )
+            cur.execute(
+                f"alter table {TABLE_NAME} add column if not exists fecha_borrado timestamptz default null"
             )
         conn.commit()
+
+
+def purge_old_deleted_transactions(days: int = 30) -> int:
+    """Permanently delete records soft-deleted more than `days` days ago."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                delete from {TABLE_NAME}
+                where activo = false
+                  and fecha_borrado is not null
+                  and fecha_borrado < now() - interval '{days} days'
+                """,
+            )
+            purged = cur.rowcount
+        conn.commit()
+    return purged
 
 
 def restore_transactions(ids: list[str]) -> int:
@@ -98,7 +117,7 @@ def soft_delete_transactions(ids: list[str]) -> int:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f"update {TABLE_NAME} set activo = false where id = any(%s)",
+                f"update {TABLE_NAME} set activo = false, fecha_borrado = now() where id = any(%s)",
                 (ids,),
             )
             deleted = cur.rowcount
