@@ -345,6 +345,17 @@ def parse_excel_date(series: pd.Series) -> pd.Series:
     if not isinstance(series, pd.Series):
         series = pd.Series(series)
 
+    # If pandas already parsed the column as datetime64, format directly.
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series.dt.strftime("%Y-%m-%d")
+
+    # openpyxl returns date cells as datetime/Timestamp objects inside an object-dtype Series.
+    # pd.to_numeric() converts a Timestamp to its nanosecond int, which then gets
+    # misinterpreted as an Excel serial → NaT.  Normalise them to ISO strings first.
+    series = series.apply(
+        lambda x: x.strftime("%Y-%m-%d") if hasattr(x, "strftime") else x
+    )
+
     numeric = pd.to_numeric(series, errors="coerce")
     parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
 
@@ -389,9 +400,25 @@ def parse_mercadopago_sheet(df_raw: pd.DataFrame, debug: bool = False) -> pd.Dat
 
     amount_series = df[amount_col].apply(clean_amount)
 
+    # RELEASE_DATE viene en formato DD-MM-YYYY (ej: "15-05-2026").
+    # .astype(str) primero neutraliza cualquier objeto datetime que openpyxl haya
+    # pre-parseado: los convierte a "YYYY-MM-DD HH:MM:SS", lo que hace que el
+    # format="%d-%m-%Y" falle (correctamente, con errors="coerce" → NaT), y el
+    # fallback los recupera vía pd.to_datetime genérico sobre el valor original.
+    # Para celdas texto "DD-MM-YYYY", .astype(str) las deja intactas y el format
+    # las parsea correctamente.
+    _raw_date_col = df[date_col]
+    _mp_dates = pd.to_datetime(_raw_date_col.astype(str), format="%d-%m-%Y", errors="coerce")
+    # Fallback para celdas que ya llegaron como Timestamp u otro tipo reconocible.
+    _still_nat = _mp_dates.isna()
+    if _still_nat.any():
+        _mp_dates[_still_nat] = pd.to_datetime(
+            _raw_date_col.loc[_still_nat.index[_still_nat]], errors="coerce"
+        )
+
     out = pd.DataFrame()
     out["ID"] = ""
-    out["Fecha"] = parse_excel_date(df[date_col])
+    out["Fecha"] = _mp_dates.dt.strftime("%Y-%m-%d")
     out["Descripción"] = df[desc_col].astype(str).str.strip()
     out["Tipo"] = amount_series.apply(lambda a: "Ingreso" if a >= 0 else "Egreso")
     out["Monto"] = amount_series.abs()
@@ -405,6 +432,10 @@ def parse_mercadopago_sheet(df_raw: pd.DataFrame, debug: bool = False) -> pd.Dat
         msg = f"Se omitieron {discarded} fila(s) con fecha inválida o nula (Mercado Pago)."
         if debug:
             print(f"ADVERTENCIA: {msg}")
+            bad_idx = [i for i in range(before) if i >= len(out)]
+            raw_sample = df[date_col].iloc[:5].tolist()
+            print(f"  Muestra de valores crudos en RELEASE_DATE: {raw_sample}")
+            print(f"  Tipos: {[type(v).__name__ for v in raw_sample]}")
         if st is not None:
             st.warning(msg)
 
@@ -573,7 +604,13 @@ def read_excel_files(folder: Path, debug: bool = False) -> pd.DataFrame:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
     consolidated = pd.concat(frames, ignore_index=True)
-    consolidated["Fecha"] = consolidated["Fecha"].dt.strftime("%Y-%m-%d")
+    # Todos los parsers ya producen strings ISO "YYYY-MM-DD"; no se necesita
+    # re-convertir. Si alguna fila escapó como otro tipo, se normaliza aquí
+    # sin ningún riesgo de inversión de día/mes porque el formato es explícito.
+    if not pd.api.types.is_object_dtype(consolidated["Fecha"]):
+        consolidated["Fecha"] = pd.to_datetime(
+            consolidated["Fecha"], format="%Y-%m-%d", errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
     return consolidated[OUTPUT_COLUMNS]
 
 
@@ -590,7 +627,9 @@ def append_to_database(rows: pd.DataFrame) -> dict[str, int]:
 
     sheet_columns = ["ID", "Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria"]
     payload = rows.reindex(columns=sheet_columns).copy()
-    payload["Fecha"] = pd.to_datetime(payload["Fecha"], errors="coerce").dt.date
+    # Las fechas entran como strings ISO "YYYY-MM-DD" producidos por cada parser.
+    # Usamos format explícito para que pandas nunca invierta día y mes.
+    payload["Fecha"] = pd.to_datetime(payload["Fecha"], format="%Y-%m-%d", errors="coerce").dt.date
     payload["ID"] = payload["ID"].astype(str).str.strip()
     original_count = len(payload)
     _valid_payload = payload[payload["Fecha"].notna() & payload["ID"].ne("")]
