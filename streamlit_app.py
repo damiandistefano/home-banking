@@ -441,11 +441,8 @@ def _dashboard_css() -> None:
         """
         <style>
         .dash-shell {
-            background: rgba(10, 12, 18, 0.55);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 18px;
-            padding: 1rem 1rem 0.5rem 1rem;
-            margin-bottom: 1rem;
+            padding: 0;
+            margin-bottom: 0.5rem;
         }
         .dash-filter-label {
             font-size: 0.78rem;
@@ -673,7 +670,7 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
         st.session_state[search_key] = ""
 
     st.markdown("<div class='dash-shell'>", unsafe_allow_html=True)
-    filter_cols = st.columns([1.6, 1.6, 2.0])
+    filter_cols = st.columns([1.4, 3.6])
 
     with filter_cols[0]:
         st.markdown("<div class='dash-filter-label'>Período</div>", unsafe_allow_html=True)
@@ -702,18 +699,8 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
             label_visibility="collapsed",
         )
 
-    with filter_cols[2]:
-        st.markdown("<div class='dash-filter-label'>Buscar</div>", unsafe_allow_html=True)
-        st.text_input(
-            "Buscar transacción...",
-            placeholder="Buscar transacción...",
-            key=search_key,
-            label_visibility="collapsed",
-        )
-
     selected_period = st.session_state[period_key]
     selected_origins = st.session_state[origin_key]
-    search_text = str(st.session_state[search_key]).strip().lower()
 
     if selected_period == "Rango Personalizado":
         raw_range = st.session_state[custom_range_key]
@@ -737,18 +724,8 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
     else:
         filtered = filtered.iloc[0:0]
 
-    if search_text:
-        search_blob = (
-            filtered[[c for c in ["Descripción", "Cuenta", "Tipo"] if c in filtered.columns]]
-            .fillna("")
-            .astype(str)
-            .agg(" ".join, axis=1)
-            .str.lower()
-        )
-        filtered = filtered[search_blob.str.contains(search_text, na=False)]
-
     st.markdown("</div>", unsafe_allow_html=True)
-    return filtered, _currency_meta(currency)[1]
+    return filtered, _currency_meta(currency)[1], search_key
 
 
 def build_cashflow_figure(frame: pd.DataFrame, currency: str):
@@ -1011,19 +988,7 @@ def _render_pdf_section(currency: str) -> None:
 
 def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     label, _ = _currency_meta(currency)
-    filtered, _ = render_dashboard_filters(frame, currency)
-
-    # ── Title row ──────────────────────────────────────────────────────────
-    title_col, badge_col = st.columns([5, 2])
-    with title_col:
-        st.markdown(f"### {label}")
-    with badge_col:
-        if not filtered.empty:
-            st.markdown(
-                f"<div style='margin-top:0.6rem; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
-                f"{len(filtered)} movimientos visibles</div>",
-                unsafe_allow_html=True,
-            )
+    filtered, _, search_key = render_dashboard_filters(frame, currency)
 
     if filtered.empty:
         st.info("No hay movimientos para los filtros seleccionados.")
@@ -1041,8 +1006,39 @@ def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
             with col_dona:
                 st.plotly_chart(build_distribution_figure(filtered, currency), use_container_width=True)
 
-        st.markdown("### Detalle de transacciones")
-        render_dashboard_detail_table(filtered, currency)
+        # ── Buscador + título + badge en la misma fila ────────────────────────
+        detail_title_col, detail_search_col, detail_badge_col = st.columns([3, 4, 2])
+        with detail_title_col:
+            st.markdown("### Detalle de transacciones")
+        with detail_search_col:
+            st.markdown("<div class='dash-filter-label' style='margin-top:0.55rem;'>Buscar</div>", unsafe_allow_html=True)
+            st.text_input(
+                "Buscar transacción...",
+                placeholder="Buscar transacción...",
+                key=search_key,
+                label_visibility="collapsed",
+            )
+        with detail_badge_col:
+            st.markdown(
+                f"<div style='margin-top:0.75rem; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
+                f"{len(filtered)} movimientos visibles</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Aplicar filtro de búsqueda sobre la tabla
+        search_text = str(st.session_state.get(search_key, "")).strip().lower()
+        table_filtered = filtered
+        if search_text:
+            search_blob = (
+                filtered[[c for c in ["Descripción", "Cuenta", "Tipo"] if c in filtered.columns]]
+                .fillna("")
+                .astype(str)
+                .agg(" ".join, axis=1)
+                .str.lower()
+            )
+            table_filtered = filtered[search_blob.str.contains(search_text, na=False)]
+
+        render_dashboard_detail_table(table_filtered, currency)
 
     st.markdown("---")
     st.markdown("#### 📄 Reporte PDF")
@@ -1377,7 +1373,6 @@ def render_dashboard_tab() -> None:
     header_left, header_right = st.columns([5, 1])
     with header_left:
         st.title("Home Banking")
-        st.subheader("Dashboard Financiero")
     with header_right:
         st.markdown("<div style='height:0.45rem;'></div>", unsafe_allow_html=True)
         if st.button("Upload", use_container_width=True):
