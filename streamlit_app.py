@@ -781,6 +781,7 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
 
     label_col = "Cuenta" if "Cuenta" in frame.columns else "Origen"
     base = frame.copy()
+    base = base[base.get("Tipo", pd.Series(dtype=str)).astype(str).str.lower() == "egreso"]
     base[label_col] = base[label_col].fillna("").astype(str).str.strip()
     base[label_col] = base[label_col].replace("", "Sin clasificar")
     values = pd.to_numeric(base["Monto"], errors="coerce").fillna(0.0).abs()
@@ -789,7 +790,7 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
 
     if grouped.empty:
         fig = go.Figure()
-        fig.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
+        fig.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución de Gastos por Cuenta - {currency_label}")
         return fig
 
     colors = px.colors.sequential.Viridis[: max(len(grouped), 3)]
@@ -810,7 +811,7 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
         template="plotly_dark",
         height=400,
         margin=dict(l=10, r=10, t=48, b=10),
-        title=f"Distribución por cuenta - {currency_label}",
+        title=f"Distribución de Gastos por Cuenta - {currency_label}",
         showlegend=True,
         legend=dict(
             title_text="Cuenta",
