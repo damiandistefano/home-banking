@@ -20,6 +20,7 @@ from transaction_uploader import (
     restore_transactions,
     update_transaction,
     purge_old_deleted_transactions,
+    ensure_table_exists,
 )
 from pdf_export import generate_monthly_pdf
 
@@ -122,6 +123,10 @@ def run_startup_tasks() -> None:
     """Run once per session: ensure schema and purge old deleted records."""
     if st.session_state.get("_startup_done"):
         return
+    try:
+        ensure_table_exists()
+    except Exception as exc:
+        st.warning(f"No se pudo verificar el esquema de la base de datos: {exc}")
     try:
         purged = purge_old_deleted_transactions(days=30)
         if purged:
