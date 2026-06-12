@@ -556,14 +556,14 @@ def _render_metric_cards_css() -> None:
     )
 
 
-def render_dashboard_kpis(frame: pd.DataFrame, currency: str) -> None:
+def render_dashboard_kpis(frame: pd.DataFrame, currency: str, vertical: bool = False) -> None:
     ingresos, egresos, neto = calculate_dashboard_totals(frame)
     symbol = _currency_meta(currency)[1]
     net_delta = "Tendencia positiva" if neto >= 0 else "Tendencia negativa"
 
     _render_metric_cards_css()
-    c1, c2, c3 = st.columns(3)
-    with c1:
+
+    if vertical:
         st.markdown(
             f"""
             <div class="metric-card neto">
@@ -571,29 +571,50 @@ def render_dashboard_kpis(frame: pd.DataFrame, currency: str) -> None:
               <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
               <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c2:
-        st.markdown(
-            f"""
-            <div class="metric-card income">
+            <div class="metric-card income" style="margin-top:0.75rem;">
               <div class="metric-label">Ingresos</div>
               <div class="metric-value">{_format_currency_value(ingresos, symbol)}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(
-            f"""
-            <div class="metric-card expense">
+            <div class="metric-card expense" style="margin-top:0.75rem;">
               <div class="metric-label">Egresos</div>
               <div class="metric-value">{_format_currency_value(egresos, symbol)}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+    else:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(
+                f"""
+                <div class="metric-card neto">
+                  <div class="metric-label">Saldo Neto</div>
+                  <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
+                  <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.markdown(
+                f"""
+                <div class="metric-card income">
+                  <div class="metric-label">Ingresos</div>
+                  <div class="metric-value">{_format_currency_value(ingresos, symbol)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with c3:
+            st.markdown(
+                f"""
+                <div class="metric-card expense">
+                  <div class="metric-label">Egresos</div>
+                  <div class="metric-value">{_format_currency_value(egresos, symbol)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 _PERIOD_OPTIONS = ["Mes Actual", "Mes Anterior", "Últimos 3 Meses", "Año Actual", "Rango Personalizado"]
@@ -652,13 +673,9 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
         st.session_state[search_key] = ""
 
     st.markdown("<div class='dash-shell'>", unsafe_allow_html=True)
-    filter_cols = st.columns([1.0, 1.6, 1.25, 1.25])
+    filter_cols = st.columns([1.6, 1.6, 2.0])
 
     with filter_cols[0]:
-        st.markdown("<div class='dash-filter-label'>Moneda</div>", unsafe_allow_html=True)
-        st.caption(_currency_meta(currency)[0])
-
-    with filter_cols[1]:
         st.markdown("<div class='dash-filter-label'>Período</div>", unsafe_allow_html=True)
         st.selectbox(
             "Período",
@@ -675,7 +692,7 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
             )
 
     origin_options = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
-    with filter_cols[2]:
+    with filter_cols[1]:
         st.markdown("<div class='dash-filter-label'>Cuenta</div>", unsafe_allow_html=True)
         st.multiselect(
             "Cuenta",
@@ -685,7 +702,7 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
             label_visibility="collapsed",
         )
 
-    with filter_cols[3]:
+    with filter_cols[2]:
         st.markdown("<div class='dash-filter-label'>Buscar</div>", unsafe_allow_html=True)
         st.text_input(
             "Buscar transacción...",
@@ -782,7 +799,7 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
     currency_label, symbol = _currency_meta(currency)
     if frame.empty:
         fig = go.Figure()
-        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
+        fig.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
         return fig
 
     label_col = "Cuenta" if "Cuenta" in frame.columns else "Origen"
@@ -795,7 +812,7 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
 
     if grouped.empty:
         fig = go.Figure()
-        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
+        fig.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
         return fig
 
     colors = px.colors.sequential.Viridis[: max(len(grouped), 3)]
@@ -814,11 +831,19 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
     )
     fig.update_layout(
         template="plotly_dark",
-        height=360,
+        height=400,
         margin=dict(l=10, r=10, t=48, b=10),
         title=f"Distribución por cuenta - {currency_label}",
         showlegend=True,
-        legend_title_text="Cuenta",
+        legend=dict(
+            title_text="Cuenta",
+            orientation="h",
+            yanchor="top",
+            y=-0.08,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
     )
     return fig
 
@@ -1003,13 +1028,18 @@ def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     if filtered.empty:
         st.info("No hay movimientos para los filtros seleccionados.")
     else:
-        render_dashboard_kpis(filtered, currency)
+        # ── Distribución en L: métricas apiladas | gráficos en paralelo ──────
+        col_izquierda, col_derecha = st.columns([3, 9])
 
-        chart_left, chart_right = st.columns(2)
-        with chart_left:
-            st.plotly_chart(build_cashflow_figure(filtered, currency), use_container_width=True)
-        with chart_right:
-            st.plotly_chart(build_distribution_figure(filtered, currency), use_container_width=True)
+        with col_izquierda:
+            render_dashboard_kpis(filtered, currency, vertical=True)
+
+        with col_derecha:
+            col_linea, col_dona = st.columns([6, 4])
+            with col_linea:
+                st.plotly_chart(build_cashflow_figure(filtered, currency), use_container_width=True)
+            with col_dona:
+                st.plotly_chart(build_distribution_figure(filtered, currency), use_container_width=True)
 
         st.markdown("### Detalle de transacciones")
         render_dashboard_detail_table(filtered, currency)
