@@ -1,5 +1,5 @@
 .venv/
 __pycache__/
 .DS_Store
-.datos_banco.txt
 *.pyc
+.streamlit/secrets.toml

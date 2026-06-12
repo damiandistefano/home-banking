@@ -15,7 +15,13 @@ from transaction_uploader import (
     read_excel_sheets,
     upload_dataframe,
     get_database_url,
+    get_db_connection,
+    soft_delete_transactions,
+    restore_transactions,
+    update_transaction,
+    purge_old_deleted_transactions,
 )
+from pdf_export import generate_monthly_pdf
 
 st.set_page_config(page_title="Importador de transacciones", layout="wide")
 
@@ -34,11 +40,95 @@ def load_db_data() -> pd.DataFrame:
           origen as "Origen",
           categoria as "Categoria"
         from movimientos
+        where activo is distinct from false
         order by fecha desc, id desc
     """
 
     with psycopg2.connect(get_database_url()) as conn:
         return pd.read_sql_query(query, conn)
+
+
+@st.cache_data(ttl=300)
+def load_deleted_data() -> pd.DataFrame:
+    import psycopg2
+
+    query = """
+        select
+          id as "ID",
+          fecha as "Fecha",
+          descripcion as "Descripción",
+          monto as "Monto",
+          tipo as "Tipo",
+          origen as "Origen",
+          categoria as "Categoria"
+        from movimientos
+        where activo = false
+        order by fecha desc, id desc
+    """
+
+    with psycopg2.connect(get_database_url()) as conn:
+        return pd.read_sql_query(query, conn)
+
+
+@st.cache_data(ttl=3600)
+def load_available_months() -> list[tuple[int, int]]:
+    """Return (year, month) tuples for months present in the DB, newest first."""
+    import psycopg2
+
+    query = """
+        select distinct
+          extract(year from fecha)::int  as year,
+          extract(month from fecha)::int as month
+        from movimientos
+        where activo is distinct from false
+        order by year desc, month desc
+    """
+    with psycopg2.connect(get_database_url()) as conn:
+        rows = pd.read_sql_query(query, conn)
+    return [(int(r["year"]), int(r["month"])) for _, r in rows.iterrows()]
+
+
+@st.cache_data(ttl=300)
+def load_db_data_for_month(year: int, month: int) -> pd.DataFrame:
+    """Load all active transactions for a specific year/month."""
+    import psycopg2
+    from calendar import monthrange
+
+    last_day = monthrange(year, month)[1]
+    query = """
+        select
+          id as "ID",
+          fecha as "Fecha",
+          descripcion as "Descripción",
+          monto as "Monto",
+          tipo as "Tipo",
+          origen as "Origen",
+          categoria as "Categoria"
+        from movimientos
+        where activo is distinct from false
+          and fecha >= %(start)s
+          and fecha <= %(end)s
+        order by fecha desc, id desc
+    """
+    params = {
+        "start": date(year, month, 1),
+        "end": date(year, month, last_day),
+    }
+    with psycopg2.connect(get_database_url()) as conn:
+        return pd.read_sql_query(query, conn, params=params)
+
+
+def run_startup_tasks() -> None:
+    """Run once per session: ensure schema and purge old deleted records."""
+    if st.session_state.get("_startup_done"):
+        return
+    try:
+        purged = purge_old_deleted_transactions(days=30)
+        if purged:
+            load_deleted_data.clear()
+    except Exception:
+        pass
+    st.session_state["_startup_done"] = True
 
 
 def format_date_column(series: pd.Series) -> pd.Series:
@@ -62,12 +152,15 @@ def format_date_column(series: pd.Series) -> pd.Series:
             origin="1899-12-30"
         )
     
-    # 3. Convertimos SOLO los textos usando el parseo normal de Pandas
+    # 3. Convertimos SOLO los textos usando formato ISO explícito.
+    # Los parsers de transaction_uploader ya emiten strings "YYYY-MM-DD".
+    # NO usar dayfirst=True aquí: pandas interpreta "YYYY-MM-DD" con dayfirst
+    # como "YYYY-DD-MM" e invierte mes y día (ej: 2026-05-04 → 2026-04-05).
     if (~es_numero).any():
         fechas_finales[~es_numero] = pd.to_datetime(
-            series[~es_numero], 
-            errors="coerce", 
-            dayfirst=True
+            series[~es_numero],
+            format="%Y-%m-%d",
+            errors="coerce",
         )
 
     # Finalmente, pasamos todo a texto limpio YYYY-MM-DD
@@ -348,11 +441,8 @@ def _dashboard_css() -> None:
         """
         <style>
         .dash-shell {
-            background: rgba(10, 12, 18, 0.55);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 18px;
-            padding: 1rem 1rem 0.5rem 1rem;
-            margin-bottom: 1rem;
+            padding: 0;
+            margin-bottom: 0.5rem;
         }
         .dash-filter-label {
             font-size: 0.78rem;
@@ -463,14 +553,14 @@ def _render_metric_cards_css() -> None:
     )
 
 
-def render_dashboard_kpis(frame: pd.DataFrame, currency: str) -> None:
+def render_dashboard_kpis(frame: pd.DataFrame, currency: str, vertical: bool = False) -> None:
     ingresos, egresos, neto = calculate_dashboard_totals(frame)
     symbol = _currency_meta(currency)[1]
     net_delta = "Tendencia positiva" if neto >= 0 else "Tendencia negativa"
 
     _render_metric_cards_css()
-    c1, c2, c3 = st.columns(3)
-    with c1:
+
+    if vertical:
         st.markdown(
             f"""
             <div class="metric-card neto">
@@ -478,71 +568,128 @@ def render_dashboard_kpis(frame: pd.DataFrame, currency: str) -> None:
               <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
               <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c2:
-        st.markdown(
-            f"""
-            <div class="metric-card income">
+            <div class="metric-card income" style="margin-top:0.75rem;">
               <div class="metric-label">Ingresos</div>
               <div class="metric-value">{_format_currency_value(ingresos, symbol)}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(
-            f"""
-            <div class="metric-card expense">
+            <div class="metric-card expense" style="margin-top:0.75rem;">
               <div class="metric-label">Egresos</div>
               <div class="metric-value">{_format_currency_value(egresos, symbol)}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+    else:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(
+                f"""
+                <div class="metric-card neto">
+                  <div class="metric-label">Saldo Neto</div>
+                  <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
+                  <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.markdown(
+                f"""
+                <div class="metric-card income">
+                  <div class="metric-label">Ingresos</div>
+                  <div class="metric-value">{_format_currency_value(ingresos, symbol)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with c3:
+            st.markdown(
+                f"""
+                <div class="metric-card expense">
+                  <div class="metric-label">Egresos</div>
+                  <div class="metric-value">{_format_currency_value(egresos, symbol)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+_PERIOD_OPTIONS = ["Mes Actual", "Mes Anterior", "Últimos 3 Meses", "Año Actual", "Rango Personalizado"]
+
+
+def _resolve_period_dates(period: str, today: date) -> tuple[date, date]:
+    from calendar import monthrange
+
+    if period == "Mes Actual":
+        start = today.replace(day=1)
+        end = today.replace(day=monthrange(today.year, today.month)[1])
+    elif period == "Mes Anterior":
+        first_of_current = today.replace(day=1)
+        last_of_prev = first_of_current - pd.Timedelta(days=1)
+        start = last_of_prev.replace(day=1)
+        end = last_of_prev
+    elif period == "Últimos 3 Meses":
+        end = today.replace(day=monthrange(today.year, today.month)[1])
+        # go back 3 months
+        month = today.month - 2
+        year = today.year
+        if month <= 0:
+            month += 12
+            year -= 1
+        start = date(year, month, 1)
+    elif period == "Año Actual":
+        start = date(today.year, 1, 1)
+        end = date(today.year, 12, 31)
+    else:
+        # Rango Personalizado — caller handles it
+        start = today.replace(day=1)
+        end = today
+    return start, end
 
 
 def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.DataFrame, str]:
-    min_date = frame["Fecha_dt"].min()
-    max_date = frame["Fecha_dt"].max()
-    if pd.isna(min_date) or pd.isna(max_date):
+    if frame.empty or frame["Fecha_dt"].isna().all():
         return frame.iloc[0:0], ""
 
-    min_day = min_date.date()
-    max_day = max_date.date()
+    today = date.today()
     currency_key = currency.lower()
-    date_key = f"dashboard_date_{currency_key}"
+    period_key = f"dashboard_period_{currency_key}"
+    custom_range_key = f"dashboard_custom_range_{currency_key}"
     origin_key = f"dashboard_origin_{currency_key}"
     search_key = f"dashboard_search_{currency_key}"
 
-    if date_key not in st.session_state:
-        st.session_state[date_key] = (min_day, max_day)
+    if period_key not in st.session_state:
+        st.session_state[period_key] = "Mes Actual"
+    if custom_range_key not in st.session_state:
+        min_day = frame["Fecha_dt"].min().date()
+        max_day = frame["Fecha_dt"].max().date()
+        st.session_state[custom_range_key] = (min_day, max_day)
     if origin_key not in st.session_state:
         st.session_state[origin_key] = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
     if search_key not in st.session_state:
         st.session_state[search_key] = ""
 
     st.markdown("<div class='dash-shell'>", unsafe_allow_html=True)
-    filter_cols = st.columns([1.0, 1.5, 1.25, 1.25])
+    filter_cols = st.columns([1.4, 3.6])
 
     with filter_cols[0]:
-        st.markdown("<div class='dash-filter-label'>Moneda</div>", unsafe_allow_html=True)
-        st.caption(_currency_meta(currency)[0])
-
-    with filter_cols[1]:
-        st.markdown("<div class='dash-filter-label'>Rango de fechas</div>", unsafe_allow_html=True)
-        st.date_input(
-            "Rango de fechas",
-            value=st.session_state[date_key],
-            min_value=min_day,
-            max_value=max_day,
-            key=date_key,
+        st.markdown("<div class='dash-filter-label'>Período</div>", unsafe_allow_html=True)
+        st.selectbox(
+            "Período",
+            options=_PERIOD_OPTIONS,
+            key=period_key,
             label_visibility="collapsed",
         )
+        if st.session_state[period_key] == "Rango Personalizado":
+            st.date_input(
+                "Rango personalizado",
+                value=st.session_state[custom_range_key],
+                key=custom_range_key,
+                label_visibility="collapsed",
+            )
 
     origin_options = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
-    with filter_cols[2]:
+    with filter_cols[1]:
         st.markdown("<div class='dash-filter-label'>Cuenta</div>", unsafe_allow_html=True)
         st.multiselect(
             "Cuenta",
@@ -552,48 +699,33 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
             label_visibility="collapsed",
         )
 
-    with filter_cols[3]:
-        st.markdown("<div class='dash-filter-label'>Buscar</div>", unsafe_allow_html=True)
-        st.text_input(
-            "Buscar transacción...",
-            placeholder="Buscar transacción...",
-            key=search_key,
-            label_visibility="collapsed",
-        )
-
-    selected_range = st.session_state[date_key]
+    selected_period = st.session_state[period_key]
     selected_origins = st.session_state[origin_key]
-    search_text = str(st.session_state[search_key]).strip().lower()
+
+    if selected_period == "Rango Personalizado":
+        raw_range = st.session_state[custom_range_key]
+        if isinstance(raw_range, (list, tuple)) and len(raw_range) == 2:
+            start_date, end_date = raw_range[0], raw_range[1]
+        elif isinstance(raw_range, (list, tuple)) and len(raw_range) == 1:
+            start_date = end_date = raw_range[0]
+        else:
+            start_date = end_date = raw_range if hasattr(raw_range, "year") else today
+    else:
+        start_date, end_date = _resolve_period_dates(selected_period, today)
 
     filtered = frame.copy()
-    if isinstance(selected_range, (list, tuple)):
-        if len(selected_range) == 2:
-            start_date, end_date = selected_range
-            filtered = filtered[(filtered["Fecha_dt"].dt.date >= start_date) & (filtered["Fecha_dt"].dt.date <= end_date)]
-        elif len(selected_range) == 1:
-            start_date = selected_range[0]
-            if hasattr(start_date, "year"):
-                filtered = filtered[filtered["Fecha_dt"].dt.date >= start_date]
-    else:
-        if hasattr(selected_range, "year"):
-            filtered = filtered[filtered["Fecha_dt"].dt.date >= selected_range]
+    filtered = filtered[
+        (filtered["Fecha_dt"].dt.date >= start_date)
+        & (filtered["Fecha_dt"].dt.date <= end_date)
+    ]
+
     if selected_origins:
         filtered = filtered[filtered["Cuenta"].isin(selected_origins)]
     else:
         filtered = filtered.iloc[0:0]
 
-    if search_text:
-        search_blob = (
-            filtered[[c for c in ["Descripción", "Cuenta", "Tipo"] if c in filtered.columns]]
-            .fillna("")
-            .astype(str)
-            .agg(" ".join, axis=1)
-            .str.lower()
-        )
-        filtered = filtered[search_blob.str.contains(search_text, na=False)]
-
     st.markdown("</div>", unsafe_allow_html=True)
-    return filtered, _currency_meta(currency)[1]
+    return filtered, _currency_meta(currency)[1], search_key
 
 
 def build_cashflow_figure(frame: pd.DataFrame, currency: str):
@@ -644,11 +776,12 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
     currency_label, symbol = _currency_meta(currency)
     if frame.empty:
         fig = go.Figure()
-        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
+        fig.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
         return fig
 
     label_col = "Cuenta" if "Cuenta" in frame.columns else "Origen"
     base = frame.copy()
+    base = base[base.get("Tipo", pd.Series(dtype=str)).astype(str).str.lower() == "egreso"]
     base[label_col] = base[label_col].fillna("").astype(str).str.strip()
     base[label_col] = base[label_col].replace("", "Sin clasificar")
     values = pd.to_numeric(base["Monto"], errors="coerce").fillna(0.0).abs()
@@ -657,7 +790,7 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
 
     if grouped.empty:
         fig = go.Figure()
-        fig.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución por cuenta - {currency_label}")
+        fig.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=40, b=10), title=f"Distribución de Gastos por Cuenta - {currency_label}")
         return fig
 
     colors = px.colors.sequential.Viridis[: max(len(grouped), 3)]
@@ -676,11 +809,19 @@ def build_distribution_figure(frame: pd.DataFrame, currency: str):
     )
     fig.update_layout(
         template="plotly_dark",
-        height=360,
+        height=400,
         margin=dict(l=10, r=10, t=48, b=10),
-        title=f"Distribución por cuenta - {currency_label}",
+        title=f"Distribución de Gastos por Cuenta - {currency_label}",
         showlegend=True,
-        legend_title_text="Cuenta",
+        legend=dict(
+            title_text="Cuenta",
+            orientation="h",
+            yanchor="top",
+            y=-0.08,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
     )
     return fig
 
@@ -690,62 +831,219 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
     if "Fecha_display" in table_df.columns:
         table_df["Fecha"] = table_df["Fecha_display"]
         table_df.drop(columns=["Fecha_display"], inplace=True, errors="ignore")
-    table_df = table_df.drop(columns=["ID", "Categoria", "Origen"], errors="ignore")
+
+    # Keep ID for tracking edits/deletes but don't expose Categoria/Origen duplicates
+    has_id = "ID" in table_df.columns
     if "Cuenta" not in table_df.columns and "Origen" in frame.columns:
         table_df["Cuenta"] = frame["Origen"]
+    table_df = table_df.drop(columns=["Categoria", "Origen", "Moneda"], errors="ignore")
 
-    visible_columns = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Cuenta"] if col in table_df.columns]
-    other_columns = [col for col in table_df.columns if col not in visible_columns]
-    table_df = table_df[visible_columns + other_columns]
+    # Add delete checkbox column at the end
+    table_df["Eliminar"] = False
+
+    visible_columns = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Cuenta", "ID", "Eliminar"] if col in table_df.columns]
+    table_df = table_df[visible_columns]
 
     symbol = _currency_meta(currency)[1]
     money_format = f"{symbol} %,.2f"
-    column_config: dict[str, object] = {}
+    # column_order excludes ID so it stays hidden but available for tracking
+    column_order = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Cuenta", "Eliminar"] if col in table_df.columns]
+    column_config: dict[str, object] = {
+        "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marcá para eliminar (soft delete)"),
+    }
 
     if "Fecha" in table_df.columns:
-        column_config["Fecha"] = st.column_config.DateColumn("Fecha", format="DD/MM/YYYY")
+        column_config["Fecha"] = st.column_config.DateColumn("Fecha", format="DD/MM/YYYY", disabled=True)
     if "Monto" in table_df.columns:
-        column_config["Monto"] = st.column_config.NumberColumn("Monto", format=money_format)
+        column_config["Monto"] = st.column_config.NumberColumn("Monto", format=money_format, min_value=0.0)
     if "Tipo" in table_df.columns:
-        column_config["Tipo"] = st.column_config.TextColumn("Tipo")
+        column_config["Tipo"] = st.column_config.SelectboxColumn("Tipo", options=["Ingreso", "Egreso"])
     if "Cuenta" in table_df.columns:
-        column_config["Cuenta"] = st.column_config.TextColumn("Cuenta")
+        column_config["Cuenta"] = st.column_config.TextColumn("Cuenta", disabled=True)
     if "Descripción" in table_df.columns:
         column_config["Descripción"] = st.column_config.TextColumn("Descripción")
+    if "ID" in table_df.columns:
+        column_config["ID"] = st.column_config.TextColumn("ID", disabled=True)
 
-    st.dataframe(
-        table_df.style.map(style_tipo, subset=["Tipo"]) if "Tipo" in table_df.columns else table_df,
+    # Unique key per currency so ARS/USD panels don't share state
+    editor_key = f"detail_editor_{currency}"
+    edited = st.data_editor(
+        table_df,
         use_container_width=True,
         hide_index=True,
         column_config=column_config,
+        column_order=column_order,
+        key=editor_key,
     )
+
+    # Show save button only when there are actual changes in the editor
+    editor_state = st.session_state.get(editor_key, {})
+    has_changes = bool(
+        editor_state.get("edited_rows")
+        or editor_state.get("added_rows")
+        or editor_state.get("deleted_rows")
+    )
+
+    if has_changes and st.button("💾 Guardar Cambios", key=f"save_changes_{currency}", type="primary"):
+        ids_to_delete = edited.loc[edited["Eliminar"] == True, "ID"].tolist() if "ID" in edited.columns else []
+        deleted_count = 0
+        updated_count = 0
+
+        if ids_to_delete:
+            deleted_count = soft_delete_transactions(ids_to_delete)
+
+        # Detect edited rows (compare with original, exclude delete-marked rows)
+        if has_id and "ID" in edited.columns:
+            original = table_df.set_index("ID")
+            edited_indexed = edited[~edited["Eliminar"]].set_index("ID")
+            for row_id, row in edited_indexed.iterrows():
+                orig = original.loc[row_id] if row_id in original.index else None
+                if orig is None:
+                    continue
+                kwargs: dict = {}
+                if "Descripción" in row and row["Descripción"] != orig.get("Descripción"):
+                    kwargs["descripcion"] = str(row["Descripción"])
+                if "Monto" in row and row["Monto"] != orig.get("Monto"):
+                    kwargs["monto"] = float(row["Monto"])
+                if "Tipo" in row and row["Tipo"] != orig.get("Tipo"):
+                    kwargs["tipo"] = str(row["Tipo"])
+                if kwargs:
+                    if update_transaction(str(row_id), **kwargs):
+                        updated_count += 1
+
+        if deleted_count or updated_count:
+            load_db_data.clear()
+            load_deleted_data.clear()
+            msgs = []
+            if deleted_count:
+                msgs.append(f"{deleted_count} movimiento(s) eliminado(s)")
+            if updated_count:
+                msgs.append(f"{updated_count} movimiento(s) actualizado(s)")
+            st.success(", ".join(msgs) + ".")
+            st.rerun()
+        else:
+            st.info("No se detectaron cambios.")
+
+
+def _render_pdf_section(currency: str) -> None:
+    """Independent PDF generator: lets user pick a month regardless of dashboard filters."""
+    month_names = [
+        "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+    ]
+
+    try:
+        available_months = load_available_months()
+    except Exception:
+        available_months = []
+
+    if not available_months:
+        st.caption("Sin datos para generar PDF.")
+        return
+
+    month_labels = [f"{month_names[m - 1]} {y}" for y, m in available_months]
+    pdf_month_key = f"pdf_month_select_{currency.lower()}"
+
+    if pdf_month_key not in st.session_state:
+        st.session_state[pdf_month_key] = month_labels[0]
+
+    selected_label = st.selectbox(
+        "Seleccionar mes para PDF",
+        options=month_labels,
+        key=pdf_month_key,
+        label_visibility="visible",
+    )
+
+    selected_idx = month_labels.index(selected_label)
+    sel_year, sel_month = available_months[selected_idx]
+    file_name = f"informe_{currency}_{sel_year}_{sel_month:02d}.pdf"
+
+    if st.button(f"📄 Generar PDF — {selected_label}", key=f"pdf_gen_btn_{currency.lower()}"):
+        try:
+            month_df_raw = load_db_data_for_month(sel_year, sel_month)
+            if month_df_raw.empty:
+                st.info("No hay movimientos para ese mes.")
+                return
+            month_df = normalize_dashboard_frame(month_df_raw)
+            month_df = month_df[month_df["Moneda"] == currency]
+            if month_df.empty:
+                st.info(f"No hay movimientos en {currency} para ese mes.")
+                return
+            pdf_bytes = generate_monthly_pdf(month_df, sel_month, sel_year, currency)
+        except Exception as exc:
+            st.warning(f"No se pudo generar el PDF: {exc}")
+            return
+
+        if pdf_bytes is None:
+            st.info("No hay movimientos para el período seleccionado.")
+            return
+
+        st.download_button(
+            label=f"⬇️ Descargar {file_name}",
+            data=pdf_bytes,
+            file_name=file_name,
+            mime="application/pdf",
+            key=f"pdf_download_{currency.lower()}_{sel_year}_{sel_month:02d}",
+        )
 
 
 def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     label, _ = _currency_meta(currency)
-    st.markdown(f"### {label}")
-    filtered, _ = render_dashboard_filters(frame, currency)
+    filtered, _, search_key = render_dashboard_filters(frame, currency)
 
     if filtered.empty:
         st.info("No hay movimientos para los filtros seleccionados.")
-        return
+    else:
+        # ── Distribución en L: métricas apiladas | gráficos en paralelo ──────
+        col_izquierda, col_derecha = st.columns([3, 9])
 
-    st.markdown(
-        f"<div style='margin: 0.5rem 0 1rem 0; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
-        f"{len(filtered)} movimientos visibles</div>",
-        unsafe_allow_html=True,
-    )
+        with col_izquierda:
+            render_dashboard_kpis(filtered, currency, vertical=True)
 
-    render_dashboard_kpis(filtered, currency)
+        with col_derecha:
+            col_linea, col_dona = st.columns([6, 4])
+            with col_linea:
+                st.plotly_chart(build_cashflow_figure(filtered, currency), use_container_width=True)
+            with col_dona:
+                st.plotly_chart(build_distribution_figure(filtered, currency), use_container_width=True)
 
-    chart_left, chart_right = st.columns(2)
-    with chart_left:
-        st.plotly_chart(build_cashflow_figure(filtered, currency), use_container_width=True)
-    with chart_right:
-        st.plotly_chart(build_distribution_figure(filtered, currency), use_container_width=True)
+        # ── Buscador + título + badge en la misma fila ────────────────────────
+        detail_title_col, detail_search_col, detail_badge_col = st.columns([3, 4, 2])
+        with detail_title_col:
+            st.markdown("### Detalle de transacciones")
+        with detail_search_col:
+            st.markdown("<div class='dash-filter-label' style='margin-top:0.55rem;'>Buscar</div>", unsafe_allow_html=True)
+            st.text_input(
+                "Buscar transacción...",
+                placeholder="Buscar transacción...",
+                key=search_key,
+                label_visibility="collapsed",
+            )
+        with detail_badge_col:
+            st.markdown(
+                f"<div style='margin-top:0.75rem; padding: 0.35rem 0.75rem; display:inline-flex; border-radius: 999px; background: rgba(255,255,255,0.08); font-weight:700;'>"
+                f"{len(filtered)} movimientos visibles</div>",
+                unsafe_allow_html=True,
+            )
 
-    st.markdown("### Detalle de transacciones")
-    render_dashboard_detail_table(filtered, currency)
+        # Aplicar filtro de búsqueda sobre la tabla
+        search_text = str(st.session_state.get(search_key, "")).strip().lower()
+        table_filtered = filtered
+        if search_text:
+            search_blob = (
+                filtered[[c for c in ["Descripción", "Cuenta", "Tipo"] if c in filtered.columns]]
+                .fillna("")
+                .astype(str)
+                .agg(" ".join, axis=1)
+                .str.lower()
+            )
+            table_filtered = filtered[search_blob.str.contains(search_text, na=False)]
+
+        render_dashboard_detail_table(table_filtered, currency)
+
+    st.markdown("---")
+    st.markdown("#### 📄 Reporte PDF")
+    _render_pdf_section(currency)
 
 
 def render_upload_tab() -> None:
@@ -754,104 +1052,119 @@ def render_upload_tab() -> None:
     if "uploader_key_version" not in st.session_state:
         st.session_state["uploader_key_version"] = 0
 
-    left_col, right_col = st.columns([4, 1])
-    with left_col:
-        st.write("Subí un archivo Excel para actualizar la base general.")
+    upload_tab, manual_tab = st.tabs(["📂 Subir Archivo Bancario", "💵 Carga Manual"])
 
-    with right_col:
+    with upload_tab:
+        st.write("Subí un archivo Excel para actualizar la base general.")
         uploaded_file = st.file_uploader(
-            "Upload",
+            "Seleccioná uno o más archivos (.xls / .xlsx)",
             type=["xls", "xlsx"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state['uploader_key_version']}",
         )
 
-    with st.expander("💵 Carga Manual de Efectivo / Caja", expanded=False):
-        with st.form(key="manual_cash_form", clear_on_submit=True):
-            col_fecha, col_desc = st.columns([1, 2])
-            with col_fecha:
-                manual_fecha = st.date_input("Fecha", value=date.today())
-            with col_desc:
-                manual_descripcion = st.text_input("Descripción")
+    with manual_tab:
+        # Show form only when there's no pending preview
+        if "manual_preview" not in st.session_state:
+            with st.form(key="manual_cash_form", clear_on_submit=True):
+                col_fecha, col_desc = st.columns([1, 2])
+                with col_fecha:
+                    manual_fecha = st.date_input("Fecha", value=date.today())
+                with col_desc:
+                    manual_descripcion = st.text_input("Descripción")
 
-            col_cuenta, col_moneda = st.columns(2)
-            with col_cuenta:
-                manual_cuenta = st.text_input("Cuenta", value="Caja Efectivo")
-            with col_moneda:
-                manual_moneda = st.selectbox("Moneda", ["ARS", "USD"])
+                col_cuenta, col_moneda = st.columns(2)
+                with col_cuenta:
+                    manual_cuenta = st.text_input("Cuenta", value="Caja Efectivo")
+                with col_moneda:
+                    manual_moneda = st.selectbox("Moneda", ["ARS", "USD"])
 
-            col_tipo, col_monto = st.columns([1, 1])
-            with col_tipo:
-                manual_tipo = st.radio(
-                    "Tipo de Movimiento",
-                    ["Ingreso", "Egreso"],
-                    horizontal=True,
-                )
-            with col_monto:
-                manual_monto = st.number_input("Monto", min_value=0.0, step=1000.0)
+                col_tipo, col_monto = st.columns([1, 1])
+                with col_tipo:
+                    manual_tipo = st.radio(
+                        "Tipo de Movimiento",
+                        ["Ingreso", "Egreso"],
+                        horizontal=True,
+                    )
+                with col_monto:
+                    manual_monto = st.number_input(
+                        "Monto",
+                        min_value=0.0,
+                        step=1000.0,
+                        value=None,
+                        placeholder="0.00",
+                    )
 
-            submitted_manual = st.form_submit_button("Registrar Movimiento", type="primary")
+                submitted_manual = st.form_submit_button("Revisar y Registrar", type="primary")
 
-        if submitted_manual:
-            if not manual_descripcion.strip():
-                st.error("La descripción es obligatoria.")
-            elif not manual_cuenta.strip():
-                st.error("La cuenta es obligatoria.")
-            elif manual_monto <= 0:
-                st.error("El monto debe ser mayor a cero.")
-            else:
-                movimiento_id = str(uuid.uuid4())
-                signed_amount = float(manual_monto) * (-1 if manual_tipo == "Egreso" else 1)
-
-                manual_df = pd.DataFrame(
-                    [
-                        {
-                            "ID": movimiento_id,
-                            "Fecha": manual_fecha,
-                            "Descripción": manual_descripcion.strip(),
-                            "Cuenta": manual_cuenta.strip(),
-                            "Monto": signed_amount,
-                            "Moneda": manual_moneda,
-                        }
-                    ]
-                )
-
-                try:
-                    from transaction_uploader import TABLE_NAME, get_db_connection
-
-                    with st.spinner("Registrando movimiento..."):
-                        record = {
-                            "id": str(movimiento_id),
-                            "fecha": manual_fecha,
-                            "descripcion": str(manual_descripcion.strip()),
-                            "monto": float(signed_amount),
-                            "tipo": str(manual_tipo),
-                            "origen": str(manual_cuenta.strip()),
-                            "categoria": "",
-                        }
-
-                        with get_db_connection() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute(
-                                    f"insert into {TABLE_NAME} (id, fecha, descripcion, monto, tipo, origen, categoria) values (%s, %s, %s, %s, %s, %s, %s)",
-                                    (
-                                        record["id"],
-                                        record["fecha"],
-                                        record["descripcion"],
-                                        record["monto"],
-                                        record["tipo"],
-                                        record["origen"],
-                                        record["categoria"],
-                                    ),
-                                )
-                            conn.commit()
-
-                    load_db_data.clear()
-                    st.success("Movimiento registrado correctamente.")
-                    time.sleep(1)
+            if submitted_manual:
+                if not manual_descripcion.strip():
+                    st.error("La descripción es obligatoria.")
+                elif not manual_cuenta.strip():
+                    st.error("La cuenta es obligatoria.")
+                elif manual_monto is None or manual_monto <= 0:
+                    st.error("El monto debe ser mayor a cero.")
+                else:
+                    signed_amount = float(manual_monto) * (-1 if manual_tipo == "Egreso" else 1)
+                    st.session_state["manual_preview"] = {
+                        "id": str(uuid.uuid4()),
+                        "fecha": manual_fecha,
+                        "descripcion": manual_descripcion.strip(),
+                        "cuenta": manual_cuenta.strip(),
+                        "monto": signed_amount,
+                        "moneda": manual_moneda,
+                        "tipo": manual_tipo,
+                    }
                     st.rerun()
-                except Exception as exc:
-                    st.error(f"Error al registrar el movimiento: {exc}")
+
+        else:
+            # Preview step
+            p = st.session_state["manual_preview"]
+            st.markdown("#### Revisá el movimiento antes de confirmar")
+            monto_fmt = f"{'🟢 +' if p['monto'] >= 0 else '🔴 -'}${abs(p['monto']):,.2f} {p['moneda']}"
+            preview_df = pd.DataFrame([{
+                "Fecha": p["fecha"].strftime("%d/%m/%Y"),
+                "Descripción": p["descripcion"],
+                "Cuenta": p["cuenta"],
+                "Tipo": p["tipo"],
+                "Monto": monto_fmt,
+            }])
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+            col_confirm, col_cancel = st.columns([1, 1])
+            with col_confirm:
+                if st.button("✅ Confirmar y guardar", type="primary", use_container_width=True):
+                    try:
+                        from transaction_uploader import TABLE_NAME, get_db_connection
+
+                        with st.spinner("Registrando movimiento..."):
+                            with get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute(
+                                        f"insert into {TABLE_NAME} (id, fecha, descripcion, monto, tipo, origen, categoria) values (%s, %s, %s, %s, %s, %s, %s)",
+                                        (
+                                            p["id"],
+                                            p["fecha"],
+                                            p["descripcion"],
+                                            p["monto"],
+                                            p["tipo"],
+                                            p["cuenta"],
+                                            "",
+                                        ),
+                                    )
+                                conn.commit()
+
+                        del st.session_state["manual_preview"]
+                        load_db_data.clear()
+                        st.success("Movimiento registrado correctamente.")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Error al registrar el movimiento: {exc}")
+            with col_cancel:
+                if st.button("✏️ Corregir", use_container_width=True):
+                    del st.session_state["manual_preview"]
+                    st.rerun()
 
     if not uploaded_file:
         if st.session_state.get("subida_exitosa"):
@@ -1004,17 +1317,68 @@ def render_upload_tab() -> None:
     st.download_button("Descargar CSV", csv_bytes, file_name="movimientos_normalizados.csv", mime="text/csv")
 
 
+def render_trash_tab() -> None:
+    st.markdown("### 🗑️ Papelera de reciclaje")
+    st.caption("Acá se muestran los movimientos eliminados. Podés recuperarlos marcándolos y haciendo clic en Restaurar.")
+
+    try:
+        df = load_deleted_data()
+    except Exception as exc:
+        st.error(f"No se pudieron cargar los movimientos eliminados: {exc}")
+        return
+
+    if df.empty:
+        st.info("No hay movimientos eliminados.")
+        return
+
+    dashboard_df = normalize_dashboard_frame(df)
+    dashboard_df["Restaurar"] = False
+
+    visible_cols = ["Restaurar", "Fecha", "Descripción", "Monto", "Tipo", "Origen", "ID"]
+    table_df = dashboard_df.reindex(columns=[c for c in visible_cols if c in dashboard_df.columns or c == "Restaurar"])
+    if "Fecha_display" in dashboard_df.columns:
+        table_df["Fecha"] = dashboard_df["Fecha_display"]
+    table_df = table_df[[c for c in visible_cols if c in table_df.columns]]
+
+    display_cols = [c for c in table_df.columns if c != "ID"]
+    column_config = {
+        "Restaurar": st.column_config.CheckboxColumn("Restaurar", help="Marcá para recuperar este movimiento"),
+        "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY", disabled=True),
+        "Monto": st.column_config.NumberColumn("Monto", format="$ %,.2f", disabled=True),
+        "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
+        "Descripción": st.column_config.TextColumn("Descripción", disabled=True),
+        "Origen": st.column_config.TextColumn("Cuenta", disabled=True),
+    }
+
+    edited = st.data_editor(
+        table_df[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config,
+        key="trash_editor",
+    )
+
+    selected_ids = table_df.loc[edited["Restaurar"] == True, "ID"].tolist() if "ID" in table_df.columns else []
+
+    if st.button("♻️ Restaurar seleccionados", type="primary", disabled=len(selected_ids) == 0):
+        count = restore_transactions(selected_ids)
+        load_db_data.clear()
+        load_deleted_data.clear()
+        st.success(f"{count} movimiento(s) restaurado(s) con éxito.")
+        st.rerun()
+
+
 def render_dashboard_tab() -> None:
     _dashboard_css()
 
     header_left, header_right = st.columns([5, 1])
     with header_left:
         st.title("Home Banking")
-        st.subheader("Dashboard Financiero")
     with header_right:
         st.markdown("<div style='height:0.45rem;'></div>", unsafe_allow_html=True)
         if st.button("Upload", use_container_width=True):
             st.session_state["view"] = "upload"
+            st.rerun()
 
     try:
         df = load_db_data()
@@ -1027,15 +1391,20 @@ def render_dashboard_tab() -> None:
         return
 
     dashboard_df = normalize_dashboard_frame(df)
-    tabs = st.tabs(["Pesos (ARS)", "Dólares (USD)"])
+    tabs = st.tabs(["Pesos (ARS)", "Dólares (USD)", "🗑️ Papelera"])
 
     with tabs[0]:
         render_dashboard_currency_panel(dashboard_df[dashboard_df["Moneda"] == "ARS"].copy(), "ARS")
 
     with tabs[1]:
         render_dashboard_currency_panel(dashboard_df[dashboard_df["Moneda"] == "USD"].copy(), "USD")
+
+    with tabs[2]:
+        render_trash_tab()
 if "view" not in st.session_state:
     st.session_state["view"] = "dashboard"
+
+run_startup_tasks()
 
 st.markdown(
     "<div style='height:0.15rem;'></div>",
