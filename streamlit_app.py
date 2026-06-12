@@ -89,12 +89,15 @@ def format_date_column(series: pd.Series) -> pd.Series:
             origin="1899-12-30"
         )
     
-    # 3. Convertimos SOLO los textos usando el parseo normal de Pandas
+    # 3. Convertimos SOLO los textos usando formato ISO explícito.
+    # Los parsers de transaction_uploader ya emiten strings "YYYY-MM-DD".
+    # NO usar dayfirst=True aquí: pandas interpreta "YYYY-MM-DD" con dayfirst
+    # como "YYYY-DD-MM" e invierte mes y día (ej: 2026-05-04 → 2026-04-05).
     if (~es_numero).any():
         fechas_finales[~es_numero] = pd.to_datetime(
-            series[~es_numero], 
-            errors="coerce", 
-            dayfirst=True
+            series[~es_numero],
+            format="%Y-%m-%d",
+            errors="coerce",
         )
 
     # Finalmente, pasamos todo a texto limpio YYYY-MM-DD
@@ -545,6 +548,15 @@ def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.Dat
 
     if date_key not in st.session_state:
         st.session_state[date_key] = (min_day, max_day)
+    else:
+        # Expand the saved range if new data extends beyond its boundaries.
+        saved = st.session_state[date_key]
+        saved_start = saved[0] if isinstance(saved, (tuple, list)) and len(saved) >= 1 else min_day
+        saved_end = saved[1] if isinstance(saved, (tuple, list)) and len(saved) >= 2 else max_day
+        new_start = min(saved_start, min_day)
+        new_end = max(saved_end, max_day)
+        if new_start != saved_start or new_end != saved_end:
+            st.session_state[date_key] = (new_start, new_end)
     if origin_key not in st.session_state:
         st.session_state[origin_key] = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
     if search_key not in st.session_state:
