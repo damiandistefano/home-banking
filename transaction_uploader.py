@@ -65,11 +65,99 @@ def ensure_table_exists() -> None:
                   monto numeric(14,2) not null,
                   tipo text not null,
                   origen text not null,
-                  categoria text default ''
+                  categoria text default '',
+                  activo boolean default true,
+                  fecha_borrado timestamptz default null
                 )
                 """
             )
+            cur.execute(
+                f"alter table {TABLE_NAME} add column if not exists activo boolean default true"
+            )
+            cur.execute(
+                f"alter table {TABLE_NAME} add column if not exists fecha_borrado timestamptz default null"
+            )
         conn.commit()
+
+
+def purge_old_deleted_transactions(days: int = 30) -> int:
+    """Permanently delete records soft-deleted more than `days` days ago."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                delete from {TABLE_NAME}
+                where activo = false
+                  and fecha_borrado is not null
+                  and fecha_borrado < now() - interval '{days} days'
+                """,
+            )
+            purged = cur.rowcount
+        conn.commit()
+    return purged
+
+
+def restore_transactions(ids: list[str]) -> int:
+    if not ids:
+        return 0
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"update {TABLE_NAME} set activo = true where id = any(%s)",
+                (ids,),
+            )
+            restored = cur.rowcount
+        conn.commit()
+    return restored
+
+
+def soft_delete_transactions(ids: list[str]) -> int:
+    if not ids:
+        return 0
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"update {TABLE_NAME} set activo = false, fecha_borrado = now() where id = any(%s)",
+                (ids,),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+    return deleted
+
+
+def update_transaction(
+    id: str,
+    descripcion: str | None = None,
+    monto: float | None = None,
+    tipo: str | None = None,
+    categoria: str | None = None,
+) -> bool:
+    fields: list[str] = []
+    values: list = []
+    if descripcion is not None:
+        fields.append("descripcion = %s")
+        values.append(descripcion)
+    if monto is not None:
+        fields.append("monto = %s")
+        values.append(monto)
+    if tipo is not None:
+        fields.append("tipo = %s")
+        values.append(tipo)
+    if categoria is not None:
+        fields.append("categoria = %s")
+        values.append(categoria)
+    if not fields:
+        return False
+    values.append(id)
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"update {TABLE_NAME} set {', '.join(fields)} where id = %s",
+                values,
+            )
+            updated = cur.rowcount > 0
+        conn.commit()
+    return updated
 
 
 def file_signature(file_path: Path) -> str:
@@ -198,9 +286,9 @@ def detect_macro_origin(df_raw: pd.DataFrame, bank_name: str = "") -> str:
     for _, row in df_raw.head(10).iterrows():
         text = " ".join("" if pd.isna(cell) else str(cell) for cell in row.tolist()).lower()
         if "caja de ahorros en pesos" in text or "caja de ahorro en pesos" in text:
-            return "Macro - Caja Ahorro Pesos"
+            return "Macro - Ahorro ARS"
         if "cuenta corriente" in text:
-            return "Macro - Cuenta Corriente"
+            return "Macro - Corriente"
     return bank_name or "Macro"
 
 
@@ -209,9 +297,9 @@ def detect_galicia_origin(df_raw: pd.DataFrame, bank_name: str = "") -> str:
         text = " ".join("" if pd.isna(cell) else str(cell) for cell in row.tolist()).lower()
         if "banco galicia" in text:
             if "caja ahorro pesos" in text or "caja de ahorro pesos" in text:
-                return "Galicia - Caja Ahorro Pesos"
+                return "Galicia - Ahorro ARS"
             if "cuenta corriente" in text:
-                return "Galicia - Cuenta Corriente"
+                return "Galicia - Corriente"
             return "Galicia"
     return bank_name or "Galicia"
 
@@ -276,6 +364,17 @@ def parse_excel_date(series: pd.Series) -> pd.Series:
     if not isinstance(series, pd.Series):
         series = pd.Series(series)
 
+    # If pandas already parsed the column as datetime64, format directly.
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series.dt.strftime("%Y-%m-%d")
+
+    # openpyxl returns date cells as datetime/Timestamp objects inside an object-dtype Series.
+    # pd.to_numeric() converts a Timestamp to its nanosecond int, which then gets
+    # misinterpreted as an Excel serial → NaT.  Normalise them to ISO strings first.
+    series = series.apply(
+        lambda x: x.strftime("%Y-%m-%d") if hasattr(x, "strftime") else x
+    )
+
     numeric = pd.to_numeric(series, errors="coerce")
     parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
 
@@ -286,7 +385,99 @@ def parse_excel_date(series: pd.Series) -> pd.Series:
     return parsed.dt.strftime("%Y-%m-%d")
 
 
+def detect_mercadopago_layout(df_raw: pd.DataFrame) -> int:
+    """Devuelve el índice de la fila de encabezado si el sheet es un extracto de Mercado Pago, sino -1."""
+    mp_headers = {"release_date", "transaction_type", "transaction_net_amount"}
+    for idx, row in df_raw.iterrows():
+        values = {str(cell).strip().lower() for cell in row.tolist() if not pd.isna(cell)}
+        if len(mp_headers & values) >= 2:
+            return int(idx)
+    return -1
+
+
+def parse_mercadopago_sheet(df_raw: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
+    header_row = detect_mercadopago_layout(df_raw)
+    if header_row == -1:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    df = df_raw.iloc[header_row + 1:].copy()
+    df.columns = [str(c).strip().upper() for c in df_raw.iloc[header_row].tolist()]
+
+    date_col, desc_col, amount_col = "RELEASE_DATE", "TRANSACTION_TYPE", "TRANSACTION_NET_AMOUNT"
+
+    if not all(c in df.columns for c in [date_col, desc_col, amount_col]):
+        if debug:
+            print(f"Mercado Pago: columnas esperadas no encontradas. Cols: {list(df.columns)}")
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    _garbage_mask = (
+        df[date_col].isna()
+        | (df[date_col].astype(str).str.strip() == "")
+        | df[amount_col].isna()
+    )
+    df = df[~_garbage_mask].copy()
+
+    amount_series = df[amount_col].apply(clean_amount)
+
+    # RELEASE_DATE viene en formato DD-MM-YYYY (ej: "15-05-2026").
+    # .astype(str) primero neutraliza cualquier objeto datetime que openpyxl haya
+    # pre-parseado: los convierte a "YYYY-MM-DD HH:MM:SS", lo que hace que el
+    # format="%d-%m-%Y" falle (correctamente, con errors="coerce" → NaT), y el
+    # fallback los recupera vía pd.to_datetime genérico sobre el valor original.
+    # Para celdas texto "DD-MM-YYYY", .astype(str) las deja intactas y el format
+    # las parsea correctamente.
+    _raw_date_col = df[date_col]
+    _mp_dates = pd.to_datetime(_raw_date_col.astype(str), format="%d-%m-%Y", errors="coerce")
+    # Fallback para celdas que ya llegaron como Timestamp u otro tipo reconocible.
+    _still_nat = _mp_dates.isna()
+    if _still_nat.any():
+        _mp_dates[_still_nat] = pd.to_datetime(
+            _raw_date_col.loc[_still_nat.index[_still_nat]], errors="coerce"
+        )
+
+    out = pd.DataFrame()
+    out["ID"] = ""
+    out["Fecha"] = _mp_dates.dt.strftime("%Y-%m-%d")
+    out["Descripción"] = df[desc_col].astype(str).str.strip()
+    out["Tipo"] = amount_series.apply(lambda a: "Ingreso" if a >= 0 else "Egreso")
+    out["Monto"] = amount_series.abs()
+    out["Origen"] = "Mercado Pago"
+    out["Categoria"] = ""
+
+    before = len(out)
+    out = out[out["Fecha"].notna() & (out["Fecha"] != "NaT")]
+    discarded = before - len(out)
+    if discarded > 0:
+        msg = f"Se omitieron {discarded} fila(s) con fecha inválida o nula (Mercado Pago)."
+        if debug:
+            print(f"ADVERTENCIA: {msg}")
+            bad_idx = [i for i in range(before) if i >= len(out)]
+            raw_sample = df[date_col].iloc[:5].tolist()
+            print(f"  Muestra de valores crudos en RELEASE_DATE: {raw_sample}")
+            print(f"  Tipos: {[type(v).__name__ for v in raw_sample]}")
+        if st is not None:
+            st.warning(msg)
+
+    out = out[out["Descripción"].ne("") & out["Descripción"].ne("nan")]
+
+    ref_col = "REFERENCE_ID"
+    if ref_col in df.columns:
+        out["ID"] = df.loc[out.index, ref_col].astype(str).str.strip().apply(
+            lambda r: hashlib.sha1(f"MP|{r}".encode("utf-8")).hexdigest()[:16]
+        )
+    else:
+        out["ID"] = out.apply(build_transaction_id, axis=1)
+
+    if debug:
+        print(f"Mercado Pago: {len(out)} transacciones parseadas.")
+
+    return out[OUTPUT_COLUMNS]
+
+
 def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = False) -> pd.DataFrame:
+    if detect_mercadopago_layout(df_raw) != -1:
+        return parse_mercadopago_sheet(df_raw, debug=debug)
+
     header_row = detect_header_row(df_raw, debug=debug)
     if header_row == -1:
         if debug:
@@ -332,8 +523,8 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
         amount_series = pd.Series([row_amount(idx) for idx in df.index], index=df.index)
         origin_series = pd.Series(
             [
-                "Santander - Caja de Ahorro Pesos" if (santander_savings_col and float(savings_series.loc[idx]) != 0)
-                else "Santander - Cuenta Corriente" if (santander_current_col and float(current_series.loc[idx]) != 0)
+                "Santander - Ahorro ARS" if (santander_savings_col and float(savings_series.loc[idx]) != 0)
+                else "Santander - Corriente" if (santander_current_col and float(current_series.loc[idx]) != 0)
                 else "Santander"
                 for idx in df.index
             ],
@@ -366,6 +557,18 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
         else:
             origin_series = pd.Series([detect_currency_origin(df_raw, bank_name or "") for _ in df.index], index=df.index)
 
+    # --- Limpieza de filas basura ---
+    # Eliminar filas donde la columna de fecha contiene literalmente el nombre del encabezado
+    _header_tokens = {"fecha", "date", "f. mov.", "f mov", "operacion", "operación"}
+    _garbage_header_mask = df[date_col].astype(str).str.strip().str.lower().isin(_header_tokens)
+    # Eliminar filas donde el monto es nulo o vacío
+    _garbage_amount_mask = df[amount_col].isna() | (df[amount_col].astype(str).str.strip() == "")
+    _garbage_mask = _garbage_header_mask | _garbage_amount_mask
+    if _garbage_mask.any():
+        df = df[~_garbage_mask].copy()
+        amount_series = amount_series[~_garbage_mask]
+        origin_series = origin_series[~_garbage_mask]
+
     out = pd.DataFrame()
     out["ID"] = ""
     out["Fecha"] = parse_excel_date(df[date_col])
@@ -375,7 +578,18 @@ def normalize_sheet(df_raw: pd.DataFrame, bank_name: str = "", debug: bool = Fal
     out["Monto"] = signed_amounts.abs()
     out["Origen"] = origin_series
     out["Categoria"] = ""
-    out = out.dropna(subset=["Fecha"])
+
+    # --- Validación ultra robusta de fechas ---
+    _before_date_filter = len(out)
+    out = out[out["Fecha"].notna() & (out["Fecha"] != "NaT")]
+    _invalid_date_count = _before_date_filter - len(out)
+    if _invalid_date_count > 0:
+        _msg = f"Se omitieron {_invalid_date_count} fila(s) con fecha inválida o nula durante la lectura del archivo."
+        if debug:
+            print(f"ADVERTENCIA: {_msg}")
+        if st is not None:
+            st.warning(_msg)
+
     out = out[out["Descripción"].ne("") & out["Descripción"].ne("nan")]
     out["ID"] = out.apply(build_transaction_id, axis=1)
 
@@ -409,7 +623,13 @@ def read_excel_files(folder: Path, debug: bool = False) -> pd.DataFrame:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
     consolidated = pd.concat(frames, ignore_index=True)
-    consolidated["Fecha"] = consolidated["Fecha"].dt.strftime("%Y-%m-%d")
+    # Todos los parsers ya producen strings ISO "YYYY-MM-DD"; no se necesita
+    # re-convertir. Si alguna fila escapó como otro tipo, se normaliza aquí
+    # sin ningún riesgo de inversión de día/mes porque el formato es explícito.
+    if not pd.api.types.is_object_dtype(consolidated["Fecha"]):
+        consolidated["Fecha"] = pd.to_datetime(
+            consolidated["Fecha"], format="%Y-%m-%d", errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
     return consolidated[OUTPUT_COLUMNS]
 
 
@@ -426,10 +646,19 @@ def append_to_database(rows: pd.DataFrame) -> dict[str, int]:
 
     sheet_columns = ["ID", "Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria"]
     payload = rows.reindex(columns=sheet_columns).copy()
-    payload["Fecha"] = pd.to_datetime(payload["Fecha"], errors="coerce").dt.date
+    # Las fechas entran como strings ISO "YYYY-MM-DD" producidos por cada parser.
+    # Usamos format explícito para que pandas nunca invierta día y mes.
+    payload["Fecha"] = pd.to_datetime(payload["Fecha"], format="%Y-%m-%d", errors="coerce").dt.date
     payload["ID"] = payload["ID"].astype(str).str.strip()
     original_count = len(payload)
-    payload = payload[payload["Fecha"].notna() & payload["ID"].ne("")].drop_duplicates(subset=["ID"], keep="first")
+    _valid_payload = payload[payload["Fecha"].notna() & payload["ID"].ne("")]
+    _db_invalid_count = original_count - len(_valid_payload)
+    if _db_invalid_count > 0:
+        _msg = f"Se omitieron {_db_invalid_count} fila(s) adicional(es) con fecha inválida antes de insertar en la base de datos."
+        print(f"ADVERTENCIA: {_msg}")
+        if st is not None:
+            st.warning(_msg)
+    payload = _valid_payload.drop_duplicates(subset=["ID"], keep="first")
     records = [
         (
             row["ID"],
