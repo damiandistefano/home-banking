@@ -654,7 +654,7 @@ def _resolve_period_dates(period: str, today: date) -> tuple[date, date]:
 
 def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.DataFrame, str]:
     if frame.empty or frame["Fecha_dt"].isna().all():
-        return frame.iloc[0:0], ""
+        return frame.iloc[0:0], "", f"dashboard_search_{currency.lower()}"
 
     today = date.today()
     currency_key = currency.lower()
