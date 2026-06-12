@@ -233,7 +233,7 @@ class _PDF(FPDF):
         self.set_y(7)
         self.set_font("Helvetica", "B", 16)
         self.set_text_color(*_TEXT_MAIN)
-        label = f"Resumen Mensual - {_month_name_es(self._mes)} {self._año}  |  {self._mon}"
+        label = f"Informe Mensual - {_month_name_es(self._mes)} {self._año}  |  {self._mon}"
         self.cell(0, 10, label, align="C")
         self.ln(14)
 
