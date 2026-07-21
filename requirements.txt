@@ -7,3 +7,4 @@ SQLAlchemy
 plotly
 fpdf2
 matplotlib
+streamlit-authenticator
