@@ -24,6 +24,7 @@ from transaction_uploader import (
     restore_transactions,
     update_transaction,
     purge_old_deleted_transactions,
+    ensure_table_exists,
 )
 from pdf_export import generate_monthly_pdf
 
@@ -235,6 +236,10 @@ def run_startup_tasks() -> None:
     """Run once per session: ensure schema and purge old deleted records."""
     if st.session_state.get("_startup_done"):
         return
+    try:
+        ensure_table_exists()
+    except Exception as exc:
+        st.warning(f"No se pudo verificar el esquema de la base de datos: {exc}")
     try:
         purged = purge_old_deleted_transactions(days=30)
         if purged:
@@ -762,7 +767,7 @@ def _resolve_period_dates(period: str, today: date) -> tuple[date, date]:
 
 def render_dashboard_filters(frame: pd.DataFrame, currency: str) -> tuple[pd.DataFrame, str]:
     if frame.empty or frame["Fecha_dt"].isna().all():
-        return frame.iloc[0:0], ""
+        return frame.iloc[0:0], "", f"dashboard_search_{currency.lower()}"
 
     today = date.today()
     currency_key = currency.lower()
