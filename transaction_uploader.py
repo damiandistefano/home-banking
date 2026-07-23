@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import re
 import os
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -131,6 +132,7 @@ def update_transaction(
     monto: float | None = None,
     tipo: str | None = None,
     categoria: str | None = None,
+    fecha: date | None = None,
 ) -> bool:
     fields: list[str] = []
     values: list = []
@@ -146,6 +148,9 @@ def update_transaction(
     if categoria is not None:
         fields.append("categoria = %s")
         values.append(categoria)
+    if fecha is not None:
+        fields.append("fecha = %s")
+        values.append(fecha)
     if not fields:
         return False
     values.append(id)
