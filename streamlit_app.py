@@ -1,13 +1,17 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from datetime import date
+import os
+import sys
 import time
 import uuid
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from plotly import express as px
+import streamlit_authenticator as stauth
 
 from transaction_uploader import (
     OUTPUT_COLUMNS,
@@ -24,7 +28,116 @@ from transaction_uploader import (
 )
 from pdf_export import generate_monthly_pdf
 
-st.set_page_config(page_title="Importador de transacciones", layout="wide")
+st.set_page_config(
+    page_title="Home Banking",
+    page_icon="static/icon-192.png",
+    layout="wide",
+)
+
+
+def inject_pwa_tags() -> None:
+    """Register the web app manifest and icons so mobile browsers offer 'install app'."""
+    components.html(
+        """
+        <script>
+        (function() {
+            const doc = window.parent.document;
+            const head = doc.head;
+
+            function addLink(rel, href) {
+                if (doc.querySelector(`link[rel="${rel}"]`)) return;
+                const link = doc.createElement('link');
+                link.rel = rel;
+                link.href = href;
+                head.appendChild(link);
+            }
+
+            function addMeta(name, content) {
+                if (doc.querySelector(`meta[name="${name}"]`)) return;
+                const meta = doc.createElement('meta');
+                meta.name = name;
+                meta.content = content;
+                head.appendChild(meta);
+            }
+
+            addLink('manifest', '/app/static/manifest.json');
+            addLink('apple-touch-icon', '/app/static/icon-192.png');
+            addMeta('theme-color', '#0b0f14');
+            addMeta('apple-mobile-web-app-capable', 'yes');
+            addMeta('apple-mobile-web-app-status-bar-style', 'black-translucent');
+            addMeta('apple-mobile-web-app-title', 'Home Banking');
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _get_config_value(key: str) -> str:
+    value = os.environ.get(key, "").strip()
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(key, "")).strip()
+    except Exception:
+        return ""
+
+
+def require_login() -> None:
+    """Gate the whole app behind a single username/password, persisted via cookie."""
+    username = _get_config_value("APP_USERNAME")
+    password = _get_config_value("APP_PASSWORD")
+    cookie_key = _get_config_value("APP_COOKIE_KEY")
+
+    if not username or not password or not cookie_key:
+        st.error(
+            "Falta configurar el login: definí las variables de entorno "
+            "APP_USERNAME, APP_PASSWORD y APP_COOKIE_KEY."
+        )
+        st.stop()
+
+    credentials = {
+        "usernames": {
+            username: {
+                "name": username,
+                "password": password,
+                "email": f"{username}@local",
+            }
+        }
+    }
+
+    authenticator = stauth.Authenticate(
+        credentials,
+        cookie_name="home_banking_auth",
+        cookie_key=cookie_key,
+        cookie_expiry_days=30,
+    )
+
+    authenticator.login(
+        location="main",
+        fields={
+            "Form name": "Iniciar sesión",
+            "Username": "Usuario",
+            "Password": "Contraseña",
+            "Login": "Ingresar",
+        },
+    )
+
+    auth_status = st.session_state.get("authentication_status")
+    if auth_status is False:
+        st.error("Usuario o contraseña incorrectos")
+        st.stop()
+    elif auth_status is None:
+        st.stop()
+
+    with st.sidebar:
+        authenticator.logout("Cerrar sesión")
+
+
+if "pytest" not in sys.modules:
+    inject_pwa_tags()
+    require_login()
 
 
 @st.cache_data(ttl=300)
