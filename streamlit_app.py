@@ -971,7 +971,7 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
     }
 
     if "Fecha" in table_df.columns:
-        column_config["Fecha"] = st.column_config.DateColumn("Fecha", format="DD/MM/YYYY", disabled=True)
+        column_config["Fecha"] = st.column_config.DateColumn("Fecha", format="DD/MM/YYYY")
     if "Monto" in table_df.columns:
         column_config["Monto"] = st.column_config.NumberColumn("Monto", format=money_format, min_value=0.0)
     if "Tipo" in table_df.columns:
@@ -1025,6 +1025,11 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
                     kwargs["monto"] = float(row["Monto"])
                 if "Tipo" in row and row["Tipo"] != orig.get("Tipo"):
                     kwargs["tipo"] = str(row["Tipo"])
+                if "Fecha" in row and pd.notna(row["Fecha"]):
+                    new_fecha = pd.Timestamp(row["Fecha"]).date()
+                    orig_fecha = pd.Timestamp(orig.get("Fecha")).date() if pd.notna(orig.get("Fecha")) else None
+                    if new_fecha != orig_fecha:
+                        kwargs["fecha"] = new_fecha
                 if kwargs:
                     if update_transaction(str(row_id), **kwargs):
                         updated_count += 1
