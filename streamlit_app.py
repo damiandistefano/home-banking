@@ -8,6 +8,7 @@ import uuid
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from plotly import express as px
 import streamlit_authenticator as stauth
@@ -26,7 +27,50 @@ from transaction_uploader import (
 )
 from pdf_export import generate_monthly_pdf
 
-st.set_page_config(page_title="Importador de transacciones", layout="wide")
+st.set_page_config(
+    page_title="Home Banking",
+    page_icon="static/icon-192.png",
+    layout="wide",
+)
+
+
+def inject_pwa_tags() -> None:
+    """Register the web app manifest and icons so mobile browsers offer 'install app'."""
+    components.html(
+        """
+        <script>
+        (function() {
+            const doc = window.parent.document;
+            const head = doc.head;
+
+            function addLink(rel, href) {
+                if (doc.querySelector(`link[rel="${rel}"]`)) return;
+                const link = doc.createElement('link');
+                link.rel = rel;
+                link.href = href;
+                head.appendChild(link);
+            }
+
+            function addMeta(name, content) {
+                if (doc.querySelector(`meta[name="${name}"]`)) return;
+                const meta = doc.createElement('meta');
+                meta.name = name;
+                meta.content = content;
+                head.appendChild(meta);
+            }
+
+            addLink('manifest', '/app/static/manifest.json');
+            addLink('apple-touch-icon', '/app/static/icon-192.png');
+            addMeta('theme-color', '#0b0f14');
+            addMeta('apple-mobile-web-app-capable', 'yes');
+            addMeta('apple-mobile-web-app-status-bar-style', 'black-translucent');
+            addMeta('apple-mobile-web-app-title', 'Home Banking');
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 def _get_config_value(key: str) -> str:
@@ -91,6 +135,7 @@ def require_login() -> None:
 
 
 if "pytest" not in sys.modules:
+    inject_pwa_tags()
     require_login()
 
 
