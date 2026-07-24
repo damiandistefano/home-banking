@@ -9,8 +9,15 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from transaction_uploader import build_transaction_id, normalize_sheet
-from streamlit_app import normalize_dashboard_frame
+import transaction_uploader
+from transaction_uploader import (
+    build_transaction_id,
+    normalize_sheet,
+    restore_transactions,
+    soft_delete_transactions,
+    update_transaction,
+)
+from streamlit_app import detect_currency_from_text, normalize_dashboard_frame
 
 
 APP_PATH = Path(__file__).resolve().parent / "streamlit_app.py"
@@ -132,6 +139,41 @@ class _FakeCursor:
 
 class _FakeConnection:
     def __init__(self, cursor: _FakeCursor):
+        self._cursor = cursor
+        self.committed = False
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        self.committed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _RecordingCursor:
+    """Captures every executed query/params and reports a configurable rowcount."""
+
+    def __init__(self, rowcount: int = 1):
+        self.rowcount = rowcount
+        self.executed: list[tuple[str, object | None]] = []
+
+    def execute(self, query, params=None):
+        self.executed.append((str(query), params))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _RecordingConnection:
+    def __init__(self, cursor: _RecordingCursor):
         self._cursor = cursor
         self.committed = False
 
@@ -330,3 +372,173 @@ def test_dedup_skips_existing_transaction_ids(tmp_path):
     assert inserted_records[0][0] != duplicate_id
     assert fake_connection.committed is True
     assert len(getattr(app, "exception", [])) == 0
+
+
+# --- Detección de moneda (ARS/USD) ---
+# La app no guarda la moneda en una columna aparte: la infiere leyendo el texto
+# de "Origen"/"Cuenta". Estos tests cubren esa detección y el bug reportado de
+# que la carga manual de "Caja Efectivo" en USD terminaba en la sección Pesos.
+
+def test_detect_currency_from_text_variants():
+    assert detect_currency_from_text("Caja Efectivo") == "ARS"
+    assert detect_currency_from_text("Galicia - Ahorro ARS") == "ARS"
+    assert detect_currency_from_text("Galicia - USD") == "USD"
+    assert detect_currency_from_text("Caja Efectivo - USD") == "USD"
+    assert detect_currency_from_text("cuenta en dolares") == "USD"
+    assert detect_currency_from_text("cuenta en dólares") == "USD"
+    assert detect_currency_from_text("pago en u$s") == "USD"
+
+
+def test_detect_currency_origin_appends_usd_suffix_from_sheet_content():
+    df_raw_usd = pd.DataFrame([["Cuenta en Dolares"], ["otro texto"]])
+    assert transaction_uploader.detect_currency_origin(df_raw_usd, "Macro") == "Macro - USD"
+
+    df_raw_ars = pd.DataFrame([["Caja de ahorro en pesos"]])
+    assert transaction_uploader.detect_currency_origin(df_raw_ars, "Macro") == "Macro"
+
+
+def test_normalize_dashboard_frame_splits_currency_by_origen():
+    df = pd.DataFrame(
+        [
+            {
+                "ID": "1", "Fecha": "2026-03-01", "Descripción": "a", "Monto": 100,
+                "Tipo": "Ingreso", "Origen": "Caja Efectivo", "Categoria": "",
+            },
+            {
+                "ID": "2", "Fecha": "2026-03-02", "Descripción": "b", "Monto": 50,
+                "Tipo": "Egreso", "Origen": "Caja Efectivo - USD", "Categoria": "",
+            },
+        ]
+    )
+    normalized = normalize_dashboard_frame(df)
+    moneda_by_id = dict(zip(normalized["ID"], normalized["Moneda"]))
+    assert moneda_by_id["1"] == "ARS"
+    assert moneda_by_id["2"] == "USD"
+
+
+def _fill_manual_cash_form(app: AppTest, *, moneda: str, monto: float, tipo: str = "Ingreso") -> AppTest:
+    for widget in app.text_input:
+        if widget.label == "Descripción":
+            widget.set_value("Carga de prueba")
+    for widget in app.selectbox:
+        if widget.label == "Moneda":
+            widget.set_value(moneda)
+    for widget in app.radio:
+        if widget.label == "Tipo de Movimiento":
+            widget.set_value(tipo)
+    for widget in app.number_input:
+        if widget.label == "Monto":
+            widget.set_value(monto)
+    _click_button(app, "Revisar y Registrar")
+    return app.run()
+
+
+def test_manual_cash_entry_in_usd_is_saved_and_classified_as_usd():
+    """Regresión: cargar 'Caja Efectivo' en USD no debe terminar en la sección Pesos."""
+    fake_cursor = _RecordingCursor()
+    fake_connection = _RecordingConnection(fake_cursor)
+
+    with patch("streamlit_app.load_db_data", return_value=_dashboard_df().copy()), patch(
+        "transaction_uploader.get_db_connection", return_value=fake_connection
+    ):
+        app = AppTest.from_file(APP_PATH).run()
+        _enter_upload_view(app)
+
+        app = _fill_manual_cash_form(app, moneda="USD", monto=100.0)
+        _click_button(app, "✅ Confirmar y guardar")
+        app.run()
+
+    assert len(getattr(app, "exception", [])) == 0
+    assert fake_connection.committed is True
+    # El schema check / purge de la papelera corren en cada sesión y usan la
+    # misma conexión mockeada; filtramos para quedarnos con el INSERT manual.
+    insert_calls = [(q, p) for q, p in fake_cursor.executed if "insert into" in q.lower()]
+    assert len(insert_calls) == 1
+    _query, params = insert_calls[0]
+    saved_origen = params[5]
+    assert saved_origen == "Caja Efectivo - USD"
+
+    # El mismo valor guardado tiene que clasificar como USD al leerlo de vuelta.
+    assert detect_currency_from_text(saved_origen) == "USD"
+
+
+def test_manual_cash_entry_in_ars_keeps_plain_account_name():
+    fake_cursor = _RecordingCursor()
+    fake_connection = _RecordingConnection(fake_cursor)
+
+    with patch("streamlit_app.load_db_data", return_value=_dashboard_df().copy()), patch(
+        "transaction_uploader.get_db_connection", return_value=fake_connection
+    ):
+        app = AppTest.from_file(APP_PATH).run()
+        _enter_upload_view(app)
+
+        app = _fill_manual_cash_form(app, moneda="ARS", monto=100.0)
+        _click_button(app, "✅ Confirmar y guardar")
+        app.run()
+
+    assert len(getattr(app, "exception", [])) == 0
+    insert_calls = [(q, p) for q, p in fake_cursor.executed if "insert into" in q.lower()]
+    assert len(insert_calls) == 1
+    _query, params = insert_calls[0]
+    saved_origen = params[5]
+    assert saved_origen == "Caja Efectivo"
+    assert detect_currency_from_text(saved_origen) == "ARS"
+
+
+# --- update_transaction / soft delete / restore ---
+
+def test_update_transaction_builds_query_for_each_field():
+    fake_cursor = _RecordingCursor(rowcount=1)
+    fake_connection = _RecordingConnection(fake_cursor)
+
+    with patch("transaction_uploader.get_db_connection", return_value=fake_connection):
+        assert update_transaction("id-1", descripcion="Nueva desc") is True
+        assert update_transaction("id-1", monto=123.45) is True
+        assert update_transaction("id-1", tipo="Egreso") is True
+        assert update_transaction("id-1", fecha=dt.date(2026, 5, 1)) is True
+        assert update_transaction(
+            "id-1", descripcion="Todo junto", monto=10.0, tipo="Ingreso", fecha=dt.date(2026, 1, 1)
+        ) is True
+
+    queries = [q for q, _ in fake_cursor.executed]
+    assert "descripcion = %s" in queries[0]
+    assert "monto = %s" in queries[1]
+    assert "tipo = %s" in queries[2]
+    assert "fecha = %s" in queries[3]
+    last_query, last_params = fake_cursor.executed[-1]
+    assert "descripcion = %s" in last_query and "fecha = %s" in last_query
+    assert last_params[-1] == "id-1"  # el id siempre va al final
+
+
+def test_update_transaction_without_fields_is_a_noop():
+    fake_cursor = _RecordingCursor()
+    fake_connection = _RecordingConnection(fake_cursor)
+
+    with patch("transaction_uploader.get_db_connection", return_value=fake_connection):
+        assert update_transaction("id-1") is False
+
+    assert fake_cursor.executed == []
+    assert fake_connection.committed is False
+
+
+def test_soft_delete_and_restore_transactions():
+    fake_cursor = _RecordingCursor(rowcount=2)
+    fake_connection = _RecordingConnection(fake_cursor)
+
+    with patch("transaction_uploader.get_db_connection", return_value=fake_connection):
+        assert soft_delete_transactions(["id-1", "id-2"]) == 2
+        assert restore_transactions(["id-1", "id-2"]) == 2
+
+        # Lista vacía: no debe ni tocar la conexión.
+        assert soft_delete_transactions([]) == 0
+        assert restore_transactions([]) == 0
+
+    delete_query, delete_params = fake_cursor.executed[0]
+    assert "activo = false" in delete_query and "fecha_borrado = now()" in delete_query
+    assert delete_params == (["id-1", "id-2"],)
+
+    restore_query, restore_params = fake_cursor.executed[1]
+    assert "activo = true" in restore_query
+    assert restore_params == (["id-1", "id-2"],)
+
+    assert len(fake_cursor.executed) == 2  # las llamadas con lista vacía no ejecutaron nada
