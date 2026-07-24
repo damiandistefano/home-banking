@@ -1260,6 +1260,12 @@ def render_upload_tab() -> None:
                     try:
                         from transaction_uploader import TABLE_NAME, get_db_connection
 
+                        # La moneda se guarda dentro de "Origen" (ej. "Caja Efectivo - USD"):
+                        # el resto de la app detecta ARS/USD leyendo ese texto, no un campo aparte.
+                        origen_value = p["cuenta"]
+                        if p["moneda"] == "USD" and detect_currency_from_text(origen_value) != "USD":
+                            origen_value = f"{origen_value} - USD"
+
                         with st.spinner("Registrando movimiento..."):
                             with get_db_connection() as conn:
                                 with conn.cursor() as cur:
@@ -1271,7 +1277,7 @@ def render_upload_tab() -> None:
                                             p["descripcion"],
                                             p["monto"],
                                             p["tipo"],
-                                            p["cuenta"],
+                                            origen_value,
                                             "",
                                         ),
                                     )
