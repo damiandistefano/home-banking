@@ -416,12 +416,10 @@ def test_normalize_dashboard_frame_splits_currency_by_origen():
     assert moneda_by_id["2"] == "USD"
 
 
-def _fill_manual_cash_form(app: AppTest, *, cuenta: str, moneda: str, monto: float, tipo: str = "Ingreso") -> AppTest:
+def _fill_manual_cash_form(app: AppTest, *, moneda: str, monto: float, tipo: str = "Ingreso") -> AppTest:
     for widget in app.text_input:
         if widget.label == "Descripción":
             widget.set_value("Carga de prueba")
-        elif widget.label == "Cuenta":
-            widget.set_value(cuenta)
     for widget in app.selectbox:
         if widget.label == "Moneda":
             widget.set_value(moneda)
@@ -446,7 +444,7 @@ def test_manual_cash_entry_in_usd_is_saved_and_classified_as_usd():
         app = AppTest.from_file(APP_PATH).run()
         _enter_upload_view(app)
 
-        app = _fill_manual_cash_form(app, cuenta="Caja Efectivo", moneda="USD", monto=100.0)
+        app = _fill_manual_cash_form(app, moneda="USD", monto=100.0)
         _click_button(app, "✅ Confirmar y guardar")
         app.run()
 
@@ -474,7 +472,7 @@ def test_manual_cash_entry_in_ars_keeps_plain_account_name():
         app = AppTest.from_file(APP_PATH).run()
         _enter_upload_view(app)
 
-        app = _fill_manual_cash_form(app, cuenta="Caja Efectivo", moneda="ARS", monto=100.0)
+        app = _fill_manual_cash_form(app, moneda="ARS", monto=100.0)
         _click_button(app, "✅ Confirmar y guardar")
         app.run()
 
