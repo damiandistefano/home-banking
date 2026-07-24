@@ -1190,15 +1190,11 @@ def render_upload_tab() -> None:
         # Show form only when there's no pending preview
         if "manual_preview" not in st.session_state:
             with st.form(key="manual_cash_form", clear_on_submit=True):
-                col_fecha, col_desc = st.columns([1, 2])
+                col_fecha, col_desc, col_moneda = st.columns([1, 2, 1])
                 with col_fecha:
                     manual_fecha = st.date_input("Fecha", value=date.today())
                 with col_desc:
                     manual_descripcion = st.text_input("Descripción")
-
-                col_cuenta, col_moneda = st.columns(2)
-                with col_cuenta:
-                    manual_cuenta = st.text_input("Cuenta", value="Caja Efectivo")
                 with col_moneda:
                     manual_moneda = st.selectbox("Moneda", ["ARS", "USD"])
 
@@ -1223,8 +1219,6 @@ def render_upload_tab() -> None:
             if submitted_manual:
                 if not manual_descripcion.strip():
                     st.error("La descripción es obligatoria.")
-                elif not manual_cuenta.strip():
-                    st.error("La cuenta es obligatoria.")
                 elif manual_monto is None or manual_monto <= 0:
                     st.error("El monto debe ser mayor a cero.")
                 else:
@@ -1233,7 +1227,7 @@ def render_upload_tab() -> None:
                         "id": str(uuid.uuid4()),
                         "fecha": manual_fecha,
                         "descripcion": manual_descripcion.strip(),
-                        "cuenta": manual_cuenta.strip(),
+                        "cuenta": "Caja Efectivo",
                         "monto": signed_amount,
                         "moneda": manual_moneda,
                         "tipo": manual_tipo,
