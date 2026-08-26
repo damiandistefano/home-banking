@@ -25,6 +25,8 @@ from transaction_uploader import (
     update_transaction,
     purge_old_deleted_transactions,
     ensure_table_exists,
+    get_saldos_iniciales,
+    set_saldo_inicial,
 )
 from pdf_export import generate_monthly_pdf
 
@@ -182,6 +184,11 @@ def load_deleted_data() -> pd.DataFrame:
 
     with psycopg2.connect(get_database_url()) as conn:
         return pd.read_sql_query(query, conn)
+
+
+@st.cache_data(ttl=300)
+def load_saldos_iniciales() -> dict[str, float]:
+    return get_saldos_iniciales()
 
 
 @st.cache_data(ttl=3600)
@@ -541,6 +548,27 @@ def calculate_dashboard_totals(frame: pd.DataFrame) -> tuple[float, float, float
     return ingresos, egresos, ingresos - egresos
 
 
+def calculate_current_balance(
+    frame: pd.DataFrame,
+    saldos_iniciales: dict[str, float],
+    selected_origins: list[str],
+) -> float:
+    """Saldo actual = saldo inicial cargado + todos los movimientos históricos
+    de las cuentas seleccionadas (sin importar el período elegido en el filtro)."""
+    if not selected_origins:
+        return 0.0
+
+    inicial = sum(saldos_iniciales.get(origen, 0.0) for origen in selected_origins)
+
+    movimientos = frame[frame["Cuenta"].isin(selected_origins)]
+    tipo = movimientos.get("Tipo", pd.Series(dtype=str)).astype(str).str.lower()
+    montos = pd.to_numeric(movimientos.get("Monto"), errors="coerce").fillna(0.0).abs()
+    ingresos = montos[tipo == "ingreso"].sum()
+    egresos = montos[tipo == "egreso"].sum()
+
+    return inicial + ingresos - egresos
+
+
 def _currency_meta(currency: str) -> tuple[str, str]:
     currency = (currency or "ARS").upper()
     return ("Pesos (ARS)", "$") if currency == "ARS" else ("Dólares (USD)", "U$S")
@@ -671,46 +699,66 @@ def _render_metric_cards_css() -> None:
     )
 
 
-def render_dashboard_kpis(frame: pd.DataFrame, currency: str, vertical: bool = False) -> None:
+def render_dashboard_kpis(
+    frame: pd.DataFrame,
+    currency: str,
+    vertical: bool = False,
+    saldo_actual: float | None = None,
+) -> None:
     ingresos, egresos, neto = calculate_dashboard_totals(frame)
     symbol = _currency_meta(currency)[1]
     net_delta = "Tendencia positiva" if neto >= 0 else "Tendencia negativa"
 
     _render_metric_cards_css()
 
+    balance_card = ""
+    if saldo_actual is not None:
+        balance_card = f"""
+            <div class="metric-card neto">
+              <div class="metric-label">Saldo Actual en Cuenta</div>
+              <div class="metric-value">{_format_currency_value(saldo_actual, symbol)}</div>
+              <div class="metric-trend {'up' if saldo_actual >= 0 else 'down'}">Saldo inicial + movimientos históricos</div>
+            </div>
+            """
+
     if vertical:
         st.markdown(
             f"""
-            <div class="metric-card neto">
-              <div class="metric-label">Saldo Neto</div>
-              <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
-              <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
-            </div>
+            {balance_card}
             <div class="metric-card income" style="margin-top:0.75rem;">
-              <div class="metric-label">Ingresos</div>
+              <div class="metric-label">Ingresos del período</div>
               <div class="metric-value">{_format_currency_value(ingresos, symbol)}</div>
             </div>
             <div class="metric-card expense" style="margin-top:0.75rem;">
-              <div class="metric-label">Egresos</div>
+              <div class="metric-label">Egresos del período</div>
               <div class="metric-value">{_format_currency_value(egresos, symbol)}</div>
+            </div>
+            <div class="metric-card expense" style="margin-top:0.75rem;">
+              <div class="metric-label">Neto del período</div>
+              <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
+              <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
     else:
-        c1, c2, c3 = st.columns(3)
-        with c1:
+        cols = st.columns(4 if saldo_actual is not None else 3)
+        col_iter = iter(cols)
+        if saldo_actual is not None:
+            with next(col_iter):
+                st.markdown(balance_card, unsafe_allow_html=True)
+        with next(col_iter):
             st.markdown(
                 f"""
                 <div class="metric-card neto">
-                  <div class="metric-label">Saldo Neto</div>
+                  <div class="metric-label">Neto del período</div>
                   <div class="metric-value">{_format_currency_value(neto, symbol)}</div>
                   <div class="metric-trend {'up' if neto >= 0 else 'down'}">{net_delta}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-        with c2:
+        with next(col_iter):
             st.markdown(
                 f"""
                 <div class="metric-card income">
@@ -720,7 +768,7 @@ def render_dashboard_kpis(frame: pd.DataFrame, currency: str, vertical: bool = F
                 """,
                 unsafe_allow_html=True,
             )
-        with c3:
+        with next(col_iter):
             st.markdown(
                 f"""
                 <div class="metric-card expense">
@@ -1110,9 +1158,62 @@ def _render_pdf_section(currency: str) -> None:
         )
 
 
+def render_saldos_iniciales_editor(currency: str, frame: pd.DataFrame, saldos_iniciales: dict[str, float]) -> None:
+    """Permite cargar/editar cuánto había en cada cuenta antes de usar la app,
+    para que el 'Saldo Actual en Cuenta' refleje la plata real y no solo lo cargado."""
+    origin_options = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
+    if not origin_options:
+        return
+
+    with st.expander("⚙️ Configurar saldo inicial por cuenta"):
+        st.caption(
+            "Cargá cuánto tenías en cada cuenta antes de empezar a usar la app, "
+            "para que el 'Saldo Actual en Cuenta' sea el real y no solo la suma de lo cargado acá."
+        )
+        symbol = _currency_meta(currency)[1]
+        editor_df = pd.DataFrame(
+            {
+                "Cuenta": origin_options,
+                "Saldo inicial": [saldos_iniciales.get(origen, 0.0) for origen in origin_options],
+            }
+        )
+        edited = st.data_editor(
+            editor_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Cuenta": st.column_config.TextColumn("Cuenta", disabled=True),
+                "Saldo inicial": st.column_config.NumberColumn("Saldo inicial", format=f"{symbol} %,.2f"),
+            },
+            key=f"saldos_iniciales_editor_{currency.lower()}",
+        )
+
+        if st.button("💾 Guardar saldos iniciales", key=f"save_saldos_iniciales_{currency.lower()}"):
+            changed = 0
+            for _, row in edited.iterrows():
+                origen = row["Cuenta"]
+                nuevo_monto = float(row["Saldo inicial"])
+                if saldos_iniciales.get(origen, 0.0) != nuevo_monto:
+                    set_saldo_inicial(origen, nuevo_monto)
+                    changed += 1
+            if changed:
+                load_saldos_iniciales.clear()
+                st.success(f"{changed} saldo(s) inicial(es) actualizado(s).")
+                st.rerun()
+            else:
+                st.info("No se detectaron cambios.")
+
+
 def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
     label, _ = _currency_meta(currency)
     filtered, _, search_key = render_dashboard_filters(frame, currency)
+
+    saldos_iniciales = load_saldos_iniciales()
+    render_saldos_iniciales_editor(currency, frame, saldos_iniciales)
+
+    origin_key = f"dashboard_origin_{currency.lower()}"
+    selected_origins = st.session_state.get(origin_key, [])
+    saldo_actual = calculate_current_balance(frame, saldos_iniciales, selected_origins)
 
     if filtered.empty:
         st.info("No hay movimientos para los filtros seleccionados.")
@@ -1121,7 +1222,7 @@ def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
         col_izquierda, col_derecha = st.columns([3, 9])
 
         with col_izquierda:
-            render_dashboard_kpis(filtered, currency, vertical=True)
+            render_dashboard_kpis(filtered, currency, vertical=True, saldo_actual=saldo_actual)
 
         with col_derecha:
             col_linea, col_dona = st.columns([6, 4])
