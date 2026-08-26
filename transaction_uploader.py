@@ -34,6 +34,7 @@ except ImportError:
 INPUT_DIR = Path("./input")
 OUTPUT_COLUMNS = ["Fecha", "Descripción", "Monto", "Tipo", "Origen", "Categoria", "ID"]
 TABLE_NAME = "movimientos"
+SALDOS_INICIALES_TABLE_NAME = "saldos_iniciales"
 
 
 def get_database_url() -> str:
@@ -77,6 +78,38 @@ def ensure_table_exists() -> None:
             )
             cur.execute(
                 f"alter table {TABLE_NAME} add column if not exists fecha_borrado timestamptz default null"
+            )
+            cur.execute(
+                f"""
+                create table if not exists {SALDOS_INICIALES_TABLE_NAME} (
+                  origen text primary key,
+                  monto numeric(14,2) not null default 0
+                )
+                """
+            )
+        conn.commit()
+
+
+def get_saldos_iniciales() -> dict[str, float]:
+    """Devuelve el saldo inicial cargado por cuenta (origen), como {origen: monto}."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"select origen, monto from {SALDOS_INICIALES_TABLE_NAME}")
+            rows = cur.fetchall()
+    return {origen: float(monto) for origen, monto in rows}
+
+
+def set_saldo_inicial(origen: str, monto: float) -> None:
+    """Crea o actualiza el saldo inicial de una cuenta."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                insert into {SALDOS_INICIALES_TABLE_NAME} (origen, monto)
+                values (%s, %s)
+                on conflict (origen) do update set monto = excluded.monto
+                """,
+                (origen, monto),
             )
         conn.commit()
 
