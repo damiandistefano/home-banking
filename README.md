@@ -4,6 +4,8 @@ Dashboard personal de finanzas: centraliza movimientos bancarios de distintos ba
 
 Construido para un usuario real que necesitaba reemplazar planillas de Excel dispersas por un único lugar donde ver, cargar y corregir sus movimientos.
 
+**🔗 [Demo pública](https://home-banking-demo-441756806758.southamerica-east1.run.app)** — usuario `demo`, contraseña `demo1234`. Datos de ejemplo, no reales.
+
 ## Qué hace
 
 - **Importa extractos bancarios** (Excel) de distintos bancos (Galicia, Macro, Mercado Pago) detectando automáticamente el formato, la moneda y la cuenta de origen de cada archivo.
@@ -27,6 +29,8 @@ Construido para un usuario real que necesitaba reemplazar planillas de Excel dis
 - **Docker + Google Cloud Run** — deploy, con CI/CD automático desde GitHub
 
 ## Correrlo localmente
+
+Para levantarlo local hace falta tu propia base Postgres (arranca vacía, sin datos de ejemplo) — para ver la app andando con datos, la demo pública de arriba es más directa.
 
 ```bash
 pip install -r requirements.txt
