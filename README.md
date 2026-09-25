@@ -28,15 +28,13 @@ Construido para un usuario real que necesitaba reemplazar planillas de Excel dis
 - **streamlit-authenticator** — login con cookie
 - **Docker + Google Cloud Run** — deploy, con CI/CD automático desde GitHub
 
-## Correrlo localmente
-
-Para levantarlo local hace falta tu propia base Postgres (arranca vacía, sin datos de ejemplo) — para ver la app andando con datos, la demo pública de arriba es más directa.
+## Desarrollo
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Crear `.streamlit/secrets.toml`:
+`.streamlit/secrets.toml`:
 
 ```toml
 DATABASE_URL = "postgresql://usuario:password@host/db"
