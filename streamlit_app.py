@@ -86,6 +86,11 @@ def _get_config_value(key: str) -> str:
         return ""
 
 
+def is_demo_mode() -> bool:
+    """True solo en el deploy de demo pública (DEMO_MODE=true), para bloquear cualquier escritura."""
+    return _get_config_value("DEMO_MODE").lower() in ("1", "true", "yes")
+
+
 def require_login() -> None:
     """Gate the whole app behind a single username/password, persisted via cookie."""
     username = _get_config_value("APP_USERNAME")
@@ -1004,6 +1009,11 @@ def render_dashboard_detail_table(frame: pd.DataFrame, currency: str) -> None:
         table_df["Cuenta"] = frame["Origen"]
     table_df = table_df.drop(columns=["Categoria", "Origen", "Moneda"], errors="ignore")
 
+    if is_demo_mode():
+        display_columns = [col for col in ["Fecha", "Descripción", "Monto", "Tipo", "Cuenta"] if col in table_df.columns]
+        st.dataframe(table_df[display_columns], use_container_width=True, hide_index=True)
+        return
+
     # Add delete checkbox column at the end
     table_df["Eliminar"] = False
 
@@ -1161,9 +1171,15 @@ def _render_pdf_section(currency: str) -> None:
 def render_saldos_iniciales_editor(currency: str, frame: pd.DataFrame, saldos_iniciales: dict[str, float]) -> None:
     """Permite cargar/editar cuánto había en cada cuenta antes de usar la app,
     para que el 'Saldo Actual en Cuenta' refleje la plata real y no solo lo cargado."""
-    origin_options = sorted([x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x])
-    if not origin_options:
+    if is_demo_mode():
         return
+
+    origin_options = set(x for x in frame["Origen"].dropna().astype(str).unique().tolist() if x)
+    # "Caja Efectivo" siempre es una cuenta válida (la carga manual la crea al vuelo),
+    # aunque todavía no tenga ningún movimiento cargado en esta moneda.
+    cash_account = "Caja Efectivo - USD" if currency.upper() == "USD" else "Caja Efectivo"
+    origin_options.add(cash_account)
+    origin_options = sorted(origin_options)
 
     with st.expander("⚙️ Configurar saldo inicial por cuenta"):
         st.caption(
@@ -1272,6 +1288,10 @@ def render_dashboard_currency_panel(frame: pd.DataFrame, currency: str) -> None:
 
 def render_upload_tab() -> None:
     st.subheader("Cargar movimientos")
+
+    if is_demo_mode():
+        st.info("Modo demo: solo lectura. La carga de movimientos está deshabilitada.")
+        return
 
     if "uploader_key_version" not in st.session_state:
         st.session_state["uploader_key_version"] = 0
@@ -1543,6 +1563,11 @@ def render_upload_tab() -> None:
 
 def render_trash_tab() -> None:
     st.markdown("### 🗑️ Papelera de reciclaje")
+
+    if is_demo_mode():
+        st.info("Modo demo: solo lectura. La papelera está deshabilitada.")
+        return
+
     st.caption("Acá se muestran los movimientos eliminados. Podés recuperarlos marcándolos y haciendo clic en Restaurar.")
 
     try:
@@ -1600,7 +1625,7 @@ def render_dashboard_tab() -> None:
         st.title("Home Banking")
     with header_right:
         st.markdown("<div style='height:0.45rem;'></div>", unsafe_allow_html=True)
-        if st.button("Upload", use_container_width=True):
+        if not is_demo_mode() and st.button("Upload", use_container_width=True):
             st.session_state["view"] = "upload"
             st.rerun()
 
